@@ -1673,34 +1673,6 @@ app.use("/api/", (req, res) => {
   res.status(404).json({ error: "API endpoint not found", path: req.path });
 });
 
-// --- Error handling middleware for API routes ---
-// Must be registered AFTER route handlers but BEFORE the gateway proxy
-// Signature: (err, req, res, next) - all 4 params required for Express to recognize as error middleware
-app.use((err, req, res, next) => {
-  // Only handle errors for API routes; let gateway proxy handle others
-  if (!req.path.startsWith("/api/")) {
-    return next(err);
-  }
-
-  // Log the error
-  console.error("[api-error]", {
-    method: req.method,
-    path: req.path,
-    status: err.status || err.statusCode || 500,
-    message: err.message,
-    stack: err.stack,
-  });
-
-  // Determine status code
-  const statusCode = err.status || err.statusCode || 500;
-
-  // Send JSON error response
-  res.status(statusCode).json({
-    error: err.message || "Internal server error",
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
-  });
-});
-
 // --- Gateway token injection ---
 // The gateway is only reachable from this container. The Control UI in the browser
 // cannot set custom Authorization headers for WebSocket connections, so we inject
