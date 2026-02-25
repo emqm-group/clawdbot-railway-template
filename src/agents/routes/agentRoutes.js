@@ -4,23 +4,20 @@ import * as agentController from "../controllers/agentController.js";
 const router = express.Router();
 
 /**
- * POST /api/agents
- * Create a new agent
+ * POST /api/agents - Create a new agent
  * Body: { agentId: string, name?: string, workspace?: string, model?: string }
  */
 router.post("/", agentController.createAgent);
 
 /**
- * GET /api/agents/:agentId
- * Get agent details
- */
-router.get("/:agentId", agentController.getAgent);
-
-/**
- * GET /api/agents
- * List all agents
+ * GET /api/agents - List all agents
  */
 router.get("/", agentController.listAgents);
+
+/**
+ * GET /api/agents/:agentId - Get agent details
+ */
+router.get("/:agentId", agentController.getAgent);
 
 /**
  * PATCH /api/agents/:agentId/config
@@ -41,18 +38,5 @@ router.patch("/:agentId", agentController.updateAgent);
  * Delete an agent
  */
 router.delete("/:agentId", agentController.deleteAgent);
-
-// Logging endpoints (access logs for debugging)
-/**
- * GET /api/agents-logs/agent-api
- * Get agent API operation logs
- */
-router.get("-logs/agent-api", agentController.getAgentApiLogs);
-
-/**
- * GET /api/agents-logs/commands
- * Get command execution logs
- */
-router.get("-logs/commands", agentController.getCommandLogs);
 
 export default router;
