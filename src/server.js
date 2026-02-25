@@ -1668,6 +1668,11 @@ function requireDashboardAuth(req, res, next) {
 const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
 app.use("/api/agents", authMiddleware(JWT_SECRET), agentRoutes);
 
+// Catch-all 404 for unmapped API routes
+app.use("/api/", (req, res) => {
+  res.status(404).json({ error: "API endpoint not found", path: req.path });
+});
+
 // --- Gateway token injection ---
 // The gateway is only reachable from this container. The Control UI in the browser
 // cannot set custom Authorization headers for WebSocket connections, so we inject
@@ -1683,11 +1688,6 @@ proxy.on("proxyReqWs", (_proxyReq, req) => {
 });
 
 app.use(requireDashboardAuth, async (req, res) => {
-  // Skip API routes (handled by dedicated middleware above)
-  if (req.path.startsWith("/api/")) {
-    return res.status(404).json({ error: "API endpoint not found" });
-  }
-
   // If not configured, force users to /setup for any non-setup routes.
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
