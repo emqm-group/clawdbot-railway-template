@@ -10,6 +10,7 @@
     "start": "node src/server.js",
     "lint": "node -c src/server.js",
     "test": "node --test",
+    "test:api": "PORT=3001 node src/server.js & sleep 2 && node test/api-routing.test.js; kill %1 2>/dev/null || true",
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {

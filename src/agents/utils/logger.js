@@ -1,24 +1,32 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 /**
  * Simple file-based logger for agent controller and wrapper operations
- * Logs are written to /data/openclaw-wrapper/logs for logical separation
+ * Logs to /data/openclaw-wrapper/logs in production, ~/.openclaw-wrapper/logs locally
  */
 
-// Fixed log directory location
-const LOG_DIR = "/data/openclaw-wrapper/logs";
-const LOG_FILE = path.join(LOG_DIR, "agent-api.log");
-const COMMAND_LOG_FILE = path.join(LOG_DIR, "commands.log");
-
-// Ensure log directory exists
+// Determine log directory - use /data in production, fallback to home dir locally
+let LOG_DIR = "/data/openclaw-wrapper/logs";
 try {
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  // Set proper permissions for log directory
   fs.chmodSync(LOG_DIR, 0o755);
 } catch (err) {
-  console.error("Failed to create log directory:", err);
+  // Fallback to home directory for local development
+  LOG_DIR = path.join(os.homedir(), ".openclaw-wrapper/logs");
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+  } catch (err2) {
+    console.warn(
+      `[logger] Could not create log directory (${LOG_DIR}), logs will only print to console`,
+    );
+    LOG_DIR = null;
+  }
 }
+
+const LOG_FILE = LOG_DIR ? path.join(LOG_DIR, "agent-api.log") : null;
+const COMMAND_LOG_FILE = LOG_DIR ? path.join(LOG_DIR, "commands.log") : null;
 
 function getTimestamp() {
   return new Date().toISOString();
@@ -30,7 +38,8 @@ function formatLogEntry(level, message, data = null) {
   return `[${timestamp}] [${level}] ${message}${dataStr}\n`;
 }
 
-function writeLog(entry, logFile = LOG_FILE) {
+function writeLog(entry, logFile) {
+  if (!logFile) return; // Skip if logging disabled
   try {
     fs.appendFileSync(logFile, entry, { encoding: "utf8" });
   } catch (err) {
@@ -42,26 +51,29 @@ export const logger = {
   info: (message, data) => {
     const entry = formatLogEntry("INFO", message, data);
     console.log(`[AGENT-API] ${message}`, data || "");
-    writeLog(entry);
+    writeLog(entry, LOG_FILE);
   },
 
   error: (message, error, data) => {
     const errorStr = error instanceof Error ? error.message : String(error);
-    const entry = formatLogEntry("ERROR", message, { error: errorStr, ...data });
+    const entry = formatLogEntry("ERROR", message, {
+      error: errorStr,
+      ...data,
+    });
     console.error(`[AGENT-API] ERROR: ${message}`, error);
-    writeLog(entry);
+    writeLog(entry, LOG_FILE);
   },
 
   debug: (message, data) => {
     const entry = formatLogEntry("DEBUG", message, data);
     console.debug(`[AGENT-API] ${message}`, data || "");
-    writeLog(entry);
+    writeLog(entry, LOG_FILE);
   },
 
   warn: (message, data) => {
     const entry = formatLogEntry("WARN", message, data);
     console.warn(`[AGENT-API] WARNING: ${message}`, data || "");
-    writeLog(entry);
+    writeLog(entry, LOG_FILE);
   },
 
   // Command execution logging

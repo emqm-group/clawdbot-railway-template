@@ -1640,6 +1640,16 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
+// --- Agent Management API Routes (MUST come before gateway proxy middleware) ---
+// JWT-secured API for managing agents
+const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
+app.use("/api/agents", authMiddleware(JWT_SECRET), agentRoutes);
+
+// Catch-all 404 for unmapped API routes
+app.use("/api/", (req, res) => {
+  res.status(404).json({ error: "API endpoint not found", path: req.path });
+});
+
 // --- Dashboard password protection ---
 // Require the same SETUP_PASSWORD for the entire Control UI dashboard,
 // not just the /setup routes.  Healthcheck is excluded so Railway probes work.
@@ -1663,16 +1673,6 @@ function requireDashboardAuth(req, res, next) {
   }
   return next();
 }
-
-// --- Agent Management API Routes ---
-// JWT-secured API for managing agents
-const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
-app.use("/api/agents", authMiddleware(JWT_SECRET), agentRoutes);
-
-// Catch-all 404 for unmapped API routes
-app.use("/api/", (req, res) => {
-  res.status(404).json({ error: "API endpoint not found", path: req.path });
-});
 
 // --- Gateway token injection ---
 // The gateway is only reachable from this container. The Control UI in the browser
