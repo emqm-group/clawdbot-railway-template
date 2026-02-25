@@ -1683,6 +1683,11 @@ proxy.on("proxyReqWs", (_proxyReq, req) => {
 });
 
 app.use(requireDashboardAuth, async (req, res) => {
+  // Skip API routes (handled by dedicated middleware above)
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ error: "API endpoint not found" });
+  }
+
   // If not configured, force users to /setup for any non-setup routes.
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
