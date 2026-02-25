@@ -6,6 +6,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 
 - **OpenClaw Gateway + Control UI** (served at `/` and `/openclaw`)
 - A friendly **Setup Wizard** at `/setup` (protected by a password)
+- **Agent Management REST API** at `/api/agents` (JWT-authenticated, merged from openclaw-wrapper)
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 - One-click **Export backup** (so users can migrate off Railway later)
 - **Import backup** from `/setup` (advanced recovery)
@@ -14,8 +15,10 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 
 - The container runs a wrapper web server.
 - The wrapper protects `/setup` (and the Control UI at `/openclaw`) with `SETUP_PASSWORD` using HTTP Basic auth.
+- The `/api/agents` REST API is protected by JWT Bearer tokens (set via `JWT_SECRET` env var).
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
+- The agent management API provides CRUD operations for agent lifecycle and configuration.
 
 ## Railway deploy instructions (what you’ll publish as a Template)
 
@@ -27,6 +30,7 @@ In Railway Template Composer:
 
 Required:
 - `SETUP_PASSWORD` — user-provided password to access `/setup` and the Control UI (`/openclaw`) via HTTP Basic auth
+- `JWT_SECRET` — secret key for signing/validating JWT tokens used by the `/api/agents` API (e.g., set this to a secure random string)
 
 Recommended:
 - `OPENCLAW_STATE_DIR=/data/.openclaw`
@@ -71,6 +75,84 @@ If you’re filing a bug, please include the output of:
 3) Open the **Bot** tab → **Add Bot**
 4) Copy the **Bot Token** and paste it into `/setup`
 5) Invite the bot to your server (OAuth2 URL Generator → scopes: `bot`, `applications.commands`; then choose permissions)
+
+## Agent Management API
+
+This deployment includes a JWT-authenticated REST API for programmatic agent management (merged from openclaw-wrapper).
+
+### Authentication
+
+All agent API requests require a Bearer token in the `Authorization` header:
+
+```bash
+Authorization: Bearer <JWT_TOKEN>
+```
+
+Generate a token using your `JWT_SECRET` (set in Railway Variables). Example:
+
+```javascript
+const jwt = require('jsonwebtoken');
+const token = jwt.sign({ sub: 'user-id' }, process.env.JWT_SECRET);
+console.log(`Bearer ${token}`);
+```
+
+### API Endpoints
+
+**Create agent**
+```
+POST /api/agents
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "agentId": "my-agent",
+  "name": "My Agent",
+  "model": "google/gemini-2.5-flash-lite",
+  "workspace": "/data/workspace-my-agent"
+}
+```
+
+**List all agents**
+```
+GET /api/agents
+Authorization: Bearer <TOKEN>
+```
+
+**Get agent details**
+```
+GET /api/agents/:agentId
+Authorization: Bearer <TOKEN>
+```
+
+**Update agent metadata**
+```
+PATCH /api/agents/:agentId
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Updated Name",
+  "model": "anthropic/claude-opus"
+}
+```
+
+**Update agent config**
+```
+PATCH /api/agents/:agentId/config
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "model": "gpt-4-turbo",
+  "workspace": "/data/custom-workspace"
+}
+```
+
+**Delete agent**
+```
+DELETE /api/agents/:agentId
+Authorization: Bearer <TOKEN>
+```
 
 ## Persistence (Railway volume)
 
@@ -165,12 +247,14 @@ docker build -t clawdbot-railway-template .
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
   -e SETUP_PASSWORD=test \
+  -e JWT_SECRET=test-secret-key \
   -e OPENCLAW_STATE_DIR=/data/.openclaw \
   -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
   -v $(pwd)/.tmpdata:/data \
   clawdbot-railway-template
 
 # open http://localhost:8080/setup (password: test)
+# Test API: curl -H "Authorization: Bearer <JWT_TOKEN>" http://localhost:8080/api/agents
 ```
 
 ---
