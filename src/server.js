@@ -1625,6 +1625,11 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
   }
 });
 
+// --- Agent Management API Routes (MUST come before any catch-all middleware) ---
+// Completely isolated from gateway proxy - registered at app root
+const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
+setupApiRoutes(app, JWT_SECRET);
+
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
   target: GATEWAY_TARGET,
@@ -1643,11 +1648,6 @@ proxy.on("error", (err, _req, res) => {
     // ignore
   }
 });
-
-// --- Agent Management API Routes (MUST come before any catch-all middleware) ---
-// Completely isolated from gateway proxy - registered at app root
-const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
-setupApiRoutes(app, JWT_SECRET);
 
 // --- Dashboard password protection ---
 // Require the same SETUP_PASSWORD for the entire Control UI dashboard,
@@ -1690,6 +1690,9 @@ proxy.on("proxyReqWs", (_proxyReq, req) => {
 // Note: /api/* routes are already handled above and never reach here
 app.use(requireDashboardAuth, async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
+  console.log(
+    `[requireDashboardAuth] incoming request: ${req.method} ${req.path}`,
+  );
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
   }

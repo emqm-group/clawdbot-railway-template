@@ -10,7 +10,7 @@ export function setupApiRoutes(app, jwtSecret) {
   // --- Agent Management API Routes ---
   // These are COMPLETELY ISOLATED and do NOT pass through gateway proxy
   // Registered FIRST before any catch-all middleware
-
+  console.log("API ROUTES REGISTERED");
   app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
 
   // Catch-all 404 for unmapped /api/* routes
