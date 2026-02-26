@@ -116,9 +116,9 @@ export const createAgent = async (req, res) => {
     const ocResult = await openclawService.createAgent(newAgentId, { name });
     logger.debug("OpenClaw agent created", { newAgentId, output: ocResult });
 
-    // Determine new agent paths
-    const newWorkspace = `~/data/.openclaw/workspace-${newAgentId}`;
-    const newAgentDir = `~/data/.openclaw/agents/${newAgentId}/agent`;
+    // Determine new agent paths (under /data/user-agents to distinguish from templates)
+    const newWorkspace = `~/data/user-agents/workspace-${newAgentId}`;
+    const newAgentDir = `~/data/user-agents/agents/${newAgentId}/agent`;
     const newWorkspaceExpanded = expand(newWorkspace);
 
     // Ensure new workspace directory exists
@@ -246,15 +246,18 @@ export const getAgent = async (req, res) => {
 
 /**
  * GET /api/agents
- * List template agents (agents whose ID starts with "template-")
+ * List template agents — those whose workspace lives under /data/.openclaw/
+ * User-generated agents are stored under /data/user-agents/ and are excluded.
  */
 export const listAgents = async (req, res) => {
   try {
     logger.info("GET /api/agents - List template agents");
 
     const allAgents = agentStorage.getAllAgents();
+    // Templates have their workspace under the openclaw state directory
+    // (/data/.openclaw/). User-created agents land in /data/user-agents/.
     const agents = allAgents.filter(
-      (a) => a.id && a.id.startsWith("template-"),
+      (a) => a.workspace && a.workspace.includes("/data/.openclaw/"),
     );
     logger.debug("Template agents retrieved from storage", {
       total: allAgents.length,
