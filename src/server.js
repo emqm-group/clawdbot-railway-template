@@ -1690,7 +1690,7 @@ proxy.on("proxyReqWs", (_proxyReq, req) => {
 // Note: /api/* routes are already handled above and never reach here
 app.use(requireDashboardAuth, async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
-  console.log(
+  logger.info(
     `[requireDashboardAuth] incoming request: ${req.method} ${req.path}`,
   );
   if (!isConfigured() && !req.path.startsWith("/setup")) {
