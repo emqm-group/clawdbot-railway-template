@@ -22,8 +22,8 @@ class OpenClawService {
         options.workspace || `/data/.openclaw/workspace-${agentId}`;
       const name = options.name || agentId;
 
-      // Run openclaw command to add agent
-      const command = `openclaw agents add ${agentId}`;
+      // Run openclaw command to add agent with explicit workspace
+      const command = `openclaw agents add ${agentId} --workspace ${workspace}`;
       logger.command(command, { agentId, workspace, name });
 
       const { stdout, stderr } = await execAsync(command);

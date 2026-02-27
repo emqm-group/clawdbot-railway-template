@@ -97,14 +97,14 @@ export const createAgent = async (req, res) => {
     // Derive new agent ID: templateId + random 8-char hex suffix
     const newAgentId = `${templateId}-${randomBytes(4).toString("hex")}`;
 
-    // Create the new agent via openclaw CLI
-    logger.info("Creating new agent via OpenClaw CLI", { newAgentId, name });
-    const ocResult = await openclawService.createAgent(newAgentId, { name });
-    logger.debug("OpenClaw agent created", { newAgentId, output: ocResult });
-
-    // Create new workspace directory
+    // Create new workspace directory before registering with openclaw
     const newWorkspaceDir = `/data/user-agents/workspace-${newAgentId}`;
     await fs.mkdir(newWorkspaceDir, { recursive: true });
+
+    // Create the new agent via openclaw CLI, pointing it at the workspace
+    logger.info("Creating new agent via OpenClaw CLI", { newAgentId, name, workspace: newWorkspaceDir });
+    const ocResult = await openclawService.createAgent(newAgentId, { name, workspace: newWorkspaceDir });
+    logger.debug("OpenClaw agent created", { newAgentId, output: ocResult });
 
     // Substitute {{VAR}} placeholders and write processed files
     logger.info("Writing processed template files to new workspace", {
@@ -129,10 +129,9 @@ export const createAgent = async (req, res) => {
       null;
 
     // Persist agent config
-    const newWorkspace = `/data/user-agents/workspace-${newAgentId}`;
     const newAgentDir = `/data/user-agents/agents/${newAgentId}/agent`;
     configManager.updateAgentInConfig(newAgentId, {
-      workspace: newWorkspace,
+      workspace: newWorkspaceDir,
       agentDir: newAgentDir,
       name,
       ...(model && { model }),
@@ -142,7 +141,7 @@ export const createAgent = async (req, res) => {
     const metadata = {
       id: newAgentId,
       name,
-      workspace: newWorkspace,
+      workspace: newWorkspaceDir,
       agentDir: newAgentDir,
       model,
       template: templateId,
