@@ -14,11 +14,11 @@ import { randomBytes } from "crypto";
 /**
  * POST /api/agents
  * Create a new agent from an existing openclaw template agent.
- * Body: { agentId: string (template), name: string, ...placeholderVars }
+ * Body: { templateId: string, configVars: { AGENT_NAME: string, ...placeholderVars } }
  *
- * - agentId: template agent ID; its workspace must have a /templates/ subfolder
- * - name: display name for the new agent
- * - placeholderVars: key/value pairs for every {{VAR}} found in template files
+ * - templateId: template agent ID; its workspace must have a /templates/ subfolder
+ * - configVars: key/value pairs for every {{VAR}} found in template files;
+ *                AGENT_NAME is required and used as the agent display name
  *
  * Reads template files from /data/.openclaw/workspace-{templateId}/templates/,
  * substitutes all {{VAR}} placeholders, and writes processed files to
@@ -26,7 +26,8 @@ import { randomBytes } from "crypto";
  */
 export const createAgent = async (req, res) => {
   try {
-    const { agentId: templateId, name, ...placeholderVars } = req.body;
+    const { templateId, configVars: placeholderVars = {} } = req.body;
+    const name = placeholderVars.AGENT_NAME;
 
     logger.info("POST /api/agents - Create agent from template", {
       templateId,
@@ -38,7 +39,7 @@ export const createAgent = async (req, res) => {
     if (!templateId || !name) {
       return res
         .status(400)
-        .json({ error: "agentId (template) and name are required" });
+        .json({ error: "templateId and configVars.AGENT_NAME are required" });
     }
 
     // Verify template agent exists on the filesystem
@@ -164,8 +165,8 @@ export const createAgent = async (req, res) => {
     });
   } catch (error) {
     logger.error("Create agent failed", error, {
-      templateId: req.body?.agentId,
-      name: req.body?.name,
+      templateId: req.body?.templateId,
+      name: req.body?.configVars?.AGENT_NAME,
     });
     return res
       .status(500)
