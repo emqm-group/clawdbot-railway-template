@@ -20,6 +20,11 @@ router.post("/", agentController.createAgent);
 router.get("/", agentController.listAgents);
 
 /**
+ * GET /api/agents/:agentId/vars - Get required template placeholder variables
+ */
+router.get("/:agentId/vars", agentController.getTemplateVars);
+
+/**
  * GET /api/agents/:agentId - Get agent details
  */
 router.get("/:agentId", agentController.getAgent);
