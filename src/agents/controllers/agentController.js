@@ -15,35 +15,34 @@ import { randomBytes } from "crypto";
 /**
  * POST /api/agents
  * Create a new agent from an existing openclaw template agent.
- * Body: { agentId: string (existing template), name: string, model: string }
+ * Body: { agentId: string (existing template), name: string }
  *
  * - agentId: must be an existing agent in openclaw (used as template)
  * - name: display name for the new agent (also used to derive its ID)
- * - model: LLM model string to configure for the new agent
+ *
+ * The model is inherited from the template agent's configuration.
  *
  * Copies AGENTS.md, BOOTSTRAP.md, HEARTBEAT.md, IDENTITY.md, SOUL.md,
  * TOOLS.md, USER.md from the template agent's workspace into the new agent's workspace.
  */
 export const createAgent = async (req, res) => {
   try {
-    const { agentId: templateId, name, model } = req.body;
+    const { agentId: templateId, name } = req.body;
 
     logger.info("POST /api/agents - Create agent from template", {
       templateId,
       name,
-      model,
     });
 
     // Validate required fields
-    if (!templateId || !name || !model) {
+    if (!templateId || !name) {
       logger.warn("Create agent failed: missing required fields", {
         templateId,
         name,
-        model,
       });
       return res
         .status(400)
-        .json({ error: "agentId (template), name, and model are required" });
+        .json({ error: "agentId (template) and name are required" });
     }
 
     // Verify the template agent exists in openclaw
@@ -159,12 +158,20 @@ export const createAgent = async (req, res) => {
       templateId,
     });
 
-    // Persist agent config to openclaw with the user-specified model
+    // Inherit the model from the template agent's config
+    const model =
+      (templateConfig && templateConfig.model) ||
+      (templateMeta && templateMeta.model) ||
+      null;
+
+    logger.debug("Inherited model from template", { templateId, model });
+
+    // Persist agent config to openclaw with the inherited model
     const agentConfig = {
       workspace: newWorkspace,
       agentDir: newAgentDir,
       name,
-      model,
+      ...(model && { model }),
     };
 
     logger.info("Updating agent config in OpenClaw", { newAgentId, model });
@@ -188,7 +195,7 @@ export const createAgent = async (req, res) => {
     logger.info("Agent created successfully", {
       newAgentId,
       name,
-      model,
+      model: model || "inherited from template",
       template: templateId,
     });
 
@@ -246,45 +253,51 @@ export const getAgent = async (req, res) => {
 
 /**
  * GET /api/agents
- * List template agents — those whose workspace lives under /data/.openclaw/
- * User-generated agents are stored under /data/user-agents/ and are excluded.
+ * List template agents by scanning /data/.openclaw/agents/ directly.
+ * Each subdirectory is an agent; enriched with config and storage metadata.
  */
 export const listAgents = async (req, res) => {
   try {
-    logger.info("GET /api/agents - List template agents");
+    logger.info("GET /api/agents - List template agents from /data/.openclaw");
 
-    const allAgents = agentStorage.getAllAgents();
-    // Templates have their workspace under the openclaw state directory
-    // (/data/.openclaw/). User-created agents land in /data/user-agents/.
-    const agents = allAgents.filter(
-      (a) => a.workspace && a.workspace.includes("/data/.openclaw/"),
-    );
-    logger.debug("Template agents retrieved from storage", {
-      total: allAgents.length,
-      templates: agents.length,
-    });
+    const openclawAgentsDir = "/data/.openclaw/agents";
 
+    let agentIds = [];
     try {
-      const ocStatus = await openclawService.listAgents();
-      logger.debug("OpenClaw agent status retrieved");
-
-      res.json({
-        success: true,
-        count: agents.length,
-        agents,
-        openclawStatus: ocStatus.raw || null,
+      const entries = await fs.readdir(openclawAgentsDir, {
+        withFileTypes: true,
       });
-    } catch (ocError) {
-      logger.warn("OpenClaw list failed, returning stored template agents", {
-        error: ocError.message,
+      agentIds = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      logger.debug("Agent directories found in /data/.openclaw/agents", {
+        count: agentIds.length,
       });
-      res.json({
-        success: true,
-        count: agents.length,
-        agents,
-        openclawStatus: "unavailable",
+    } catch (e) {
+      logger.warn("Could not read /data/.openclaw/agents directory", {
+        error: e.message,
       });
     }
+
+    const agents = agentIds.map((agentId) => {
+      const configAgent = configManager.getAgentConfig(agentId);
+      const storedAgent = agentStorage.getAgent(agentId);
+      return {
+        id: agentId,
+        workspace: `/data/.openclaw/workspace-${agentId}`,
+        agentDir: `/data/.openclaw/agents/${agentId}/agent`,
+        ...(storedAgent || {}),
+        ...(configAgent || {}),
+      };
+    });
+
+    logger.debug("Template agents listed from /data/.openclaw", {
+      count: agents.length,
+    });
+
+    return res.json({
+      success: true,
+      count: agents.length,
+      agents,
+    });
   } catch (error) {
     logger.error("List agents failed", error);
     res.status(500).json({ error: error.message || "Failed to list agents" });
