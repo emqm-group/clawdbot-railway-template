@@ -63,17 +63,38 @@ class OpenClawService {
    */
   async deleteAgent(agentId) {
     try {
-      // This is a placeholder as openclaw CLI may not have direct delete
-      // In practice, you'd need to clean up the agent directory
-      const command = `rm -rf /data/.openclaw/agents/${agentId}`;
+      // Run openclaw CLI delete — updates openclaw.json but may fail to Trash
+      // directories in containerised environments (no Trash available).
+      const command = `openclaw agents delete ${agentId} --force`;
       logger.command(command, { agentId });
 
-      await execAsync(command);
+      const { stdout, stderr } = await execAsync(command);
 
       logger.commandResult(command, {
         success: true,
-        agentId,
+        stdout: stdout.substring(0, 200),
+        stderr: stderr ? stderr.substring(0, 200) : null,
       });
+
+      // Openclaw may fail to move directories to Trash and leave them behind.
+      // Manually remove the workspace and agent directories to ensure a clean delete.
+      const pathsToRemove = [
+        `/data/.openclaw/workspace-${agentId}`,
+        `/data/.openclaw/agents/${agentId}`,
+      ];
+
+      for (const p of pathsToRemove) {
+        try {
+          await execAsync(`rm -rf ${p}`);
+          logger.debug("Removed leftover path", { path: p });
+        } catch (rmErr) {
+          // Non-fatal: log and continue
+          logger.warn("Could not remove path during agent delete", {
+            path: p,
+            error: rmErr.message,
+          });
+        }
+      }
 
       return {
         success: true,
