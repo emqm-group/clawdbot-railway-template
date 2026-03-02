@@ -1,6 +1,7 @@
 import { execSync } from "child_process";
 import { exec } from "child_process";
 import { promisify } from "util";
+import path from "path";
 import logger from "./logger.js";
 
 const execAsync = promisify(exec);
@@ -88,6 +89,13 @@ class OpenClawService {
         options.agentDir  || `/data/.openclaw/agents/${agentId}`,
       ];
 
+      // agentDir is typically the inner /agent subdirectory
+      // (e.g. /data/user-agents/agents/<id>/agent). Remove the parent
+      // so no empty <id>/ directory is left behind.
+      if (options.agentDir) {
+        pathsToRemove.push(path.dirname(options.agentDir));
+      }
+
       for (const p of pathsToRemove) {
         try {
           await execAsync(`rm -rf ${p}`);
@@ -165,8 +173,10 @@ class OpenClawService {
         outputLength: stdout.length,
       });
 
-      const jobs = JSON.parse(stdout);
-      return Array.isArray(jobs) ? jobs : [];
+      const parsed = JSON.parse(stdout);
+      // CLI may return a bare array or an object like { jobs: [...] }
+      const jobs = Array.isArray(parsed) ? parsed : (parsed.jobs ?? []);
+      return jobs;
     } catch (error) {
       logger.error("listCronJobs failed", error);
       throw {
