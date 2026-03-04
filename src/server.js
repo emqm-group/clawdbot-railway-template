@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import express from "express";
 import httpProxy from "http-proxy";
@@ -1711,7 +1712,12 @@ app.use(async (req, res, next) => {
         ].join("\n");
         return res.status(503).type("text/plain").send(hint);
       }
-      return proxy.web(req, res, { target: GATEWAY_TARGET });
+      // express.json() consumes the body stream globally, so re-stream it
+      // from req.body so the gateway receives the full request payload.
+      const bodyBuffer = Buffer.from(JSON.stringify(req.body ?? {}));
+      req.headers["content-length"] = String(bodyBuffer.length);
+      const bodyStream = Readable.from(bodyBuffer);
+      return proxy.web(req, res, { target: GATEWAY_TARGET, buffer: bodyStream });
     }
     return res.status(401).type("text/plain").send("Invalid token");
   }
