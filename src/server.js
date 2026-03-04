@@ -1686,6 +1686,38 @@ proxy.on("proxyReqWs", (_proxyReq, req) => {
   attachGatewayAuthHeader(req);
 });
 
+// --- Bearer token pass-through for direct API access ---
+// Requests with a valid Bearer token (matching OPENCLAW_GATEWAY_TOKEN) are proxied
+// directly to the gateway without requiring Basic/dashboard auth.
+app.use(async (req, res, next) => {
+  const header = req.headers.authorization || "";
+  const [scheme, token] = header.split(" ");
+  if (scheme === "Bearer" && token && OPENCLAW_GATEWAY_TOKEN) {
+    if (
+      token.length === OPENCLAW_GATEWAY_TOKEN.length &&
+      crypto.timingSafeEqual(Buffer.from(token), Buffer.from(OPENCLAW_GATEWAY_TOKEN))
+    ) {
+      if (!isConfigured()) return res.redirect("/setup");
+      try {
+        await ensureGatewayRunning();
+      } catch (err) {
+        const hint = [
+          "Gateway not ready.",
+          String(err),
+          lastGatewayError ? `\n${lastGatewayError}` : "",
+          "\nTroubleshooting:",
+          "- Visit /setup and check the Debug Console",
+          "- Visit /setup/api/debug for config + gateway diagnostics",
+        ].join("\n");
+        return res.status(503).type("text/plain").send(hint);
+      }
+      return proxy.web(req, res, { target: GATEWAY_TARGET });
+    }
+    return res.status(401).type("text/plain").send("Invalid token");
+  }
+  next();
+});
+
 // --- Gateway proxy (handles all non-API, non-setup routes) ---
 // Note: /api/* routes are already handled above and never reach here
 app.use(requireDashboardAuth, async (req, res) => {
