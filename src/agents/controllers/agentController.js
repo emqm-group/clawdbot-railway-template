@@ -241,28 +241,19 @@ export const getAgent = async (req, res) => {
 
     logger.info("GET /api/agents/:agentId - Get agent details", { agentId });
 
-    const agent = agentStorage.getAgent(agentId);
+    const agents = await openclawService.listAgents();
+    const agent = agents.find((a) => a.id === agentId);
+
     if (!agent) {
       logger.warn("Get agent failed: agent not found", { agentId });
       return res.status(404).json({ error: `Agent ${agentId} not found` });
     }
 
-    // Enrich with config data
-    const configAgent = configManager.getAgentConfig(agentId);
     logger.debug("Agent retrieved successfully", { agentId });
-
-    res.json({
-      success: true,
-      agent: {
-        ...agent,
-        ...(configAgent && { openclawConfig: configAgent }),
-      },
-    });
+    res.json({ success: true, agent });
   } catch (error) {
     logger.error("Get agent failed", error, { agentId: req.params?.agentId });
-    res
-      .status(500)
-      .json({ error: error.message || "Failed to retrieve agent" });
+    res.status(500).json({ error: error.message || "Failed to retrieve agent" });
   }
 };
 

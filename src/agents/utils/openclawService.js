@@ -129,11 +129,11 @@ class OpenClawService {
 
   /**
    * List all agents
-   * @returns {Promise<array>} - List of agents from openclaw
+   * @returns {Promise<array>} - Array of agent objects from openclaw
    */
   async listAgents() {
     try {
-      const command = `openclaw agents list --bindings`;
+      const command = `openclaw agents list --json`;
       logger.command(command);
 
       const { stdout } = await execAsync(command);
@@ -143,13 +143,8 @@ class OpenClawService {
         outputLength: stdout.length,
       });
 
-      // Parse the output (openclaw agents list returns tabular data)
-      // For now, return raw output - user can parse as needed
-      return {
-        success: true,
-        agents: stdout,
-        raw: stdout,
-      };
+      const parsed = JSON.parse(stdout);
+      return Array.isArray(parsed) ? parsed : [];
     } catch (error) {
       logger.error("listAgents failed", error);
       throw {
@@ -226,16 +221,12 @@ class OpenClawService {
    */
   async agentExists(agentId) {
     try {
-      const command = `openclaw agents list`;
-      logger.debug("Checking if agent exists in openclaw", { agentId, command });
-
-      const { stdout } = await execAsync(command);
-      const exists = stdout.includes(agentId);
-
+      const agents = await this.listAgents();
+      const exists = agents.some((a) => a.id === agentId);
       logger.debug("Agent existence check result", { agentId, exists });
       return exists;
     } catch (error) {
-      logger.warn("agentExists CLI check failed, falling back to false", {
+      logger.warn("agentExists check failed, falling back to false", {
         agentId,
         error: error.message,
       });
