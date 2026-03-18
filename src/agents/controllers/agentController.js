@@ -4,7 +4,6 @@ import agentStorage from "../utils/agentStorage.js";
 import logger from "../utils/logger.js";
 import { promises as fs } from "fs";
 import path from "path";
-import { randomBytes } from "crypto";
 
 /**
  * Agent Controller
@@ -13,166 +12,43 @@ import { randomBytes } from "crypto";
 
 /**
  * POST /api/agents
- * Create a new agent from an existing openclaw template agent.
- * Body: { templateId: string, configVars: { AGENT_NAME: string, ...placeholderVars } }
- *
- * - templateId: template agent ID; its workspace must have a /templates/ subfolder
- * - configVars: key/value pairs for every {{VAR}} found in template files;
- *                AGENT_NAME is required and used as the agent display name
- *
- * Reads template files from /data/.openclaw/workspace-{templateId}/templates/,
- * substitutes all {{VAR}} placeholders, and writes processed files to
- * /data/user-agents/workspace-{newAgentId}/.
+ * Create a new agent in this openclaw instance.
+ * Body: { agentId: string, name?: string }
  */
 export const createAgent = async (req, res) => {
   try {
-    const { templateId, configVars: placeholderVars = {} } = req.body;
-    const name = placeholderVars.AGENT_NAME;
+    const { agentId, name } = req.body;
 
-    logger.info("POST /api/agents - Create agent from template", {
-      templateId,
-      name,
-      placeholderKeys: Object.keys(placeholderVars),
-    });
-
-    // Validate required fields
-    if (!templateId || !name) {
-      return res
-        .status(400)
-        .json({ error: "templateId and configVars.AGENT_NAME are required" });
+    if (!agentId) {
+      return res.status(400).json({ error: "agentId is required" });
     }
 
-    // Verify template agent exists on the filesystem
-    const templateAgentDir = `/data/.openclaw/agents/${templateId}`;
-    try {
-      await fs.stat(templateAgentDir);
-    } catch {
-      logger.warn("Template agent not found on filesystem", { templateId });
-      return res
-        .status(404)
-        .json({ error: `Template agent ${templateId} not found` });
-    }
+    const agentName = name || agentId;
 
-    // Read template files from /data/.openclaw/workspace-{templateId}/templates/
-    const templateFilesDir = `/data/.openclaw/workspace-${templateId}/templates`;
-    let templateFileNames;
-    try {
-      templateFileNames = await fs.readdir(templateFilesDir);
-    } catch {
-      return res.status(404).json({
-        error: `Templates directory not found for agent ${templateId}`,
-      });
-    }
+    logger.info("POST /api/agents - Create agent", { agentId, name: agentName });
 
-    // Load all template file contents
-    const fileContents = {};
-    for (const file of templateFileNames) {
-      fileContents[file] = await fs.readFile(
-        path.join(templateFilesDir, file),
-        "utf8",
-      );
-    }
+    const workspace = `/data/.openclaw/workspace-${agentId}`;
+    await openclawService.createAgent(agentId, { name: agentName, workspace });
 
-    // Extract all unique {{VAR}} placeholders across all template files
-    const allContent = Object.values(fileContents).join("\n");
-    const requiredVars = [
-      ...new Set(
-        [...allContent.matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]),
-      ),
-    ];
+    const agentDir = `/data/.openclaw/agents/${agentId}/agent`;
+    configManager.updateAgentInConfig(agentId, { workspace, agentDir, name: agentName });
 
-    // Validate all placeholders are supplied
-    const missingVars = requiredVars.filter((v) => !(v in placeholderVars));
-    if (missingVars.length > 0) {
-      logger.warn("Create agent failed: missing template variables", {
-        templateId,
-        missingVars,
-      });
-      return res.status(400).json({
-        error: "Missing required template variables",
-        missingVars,
-      });
-    }
-
-    // Derive new agent ID: templateId + random 8-char hex suffix
-    const newAgentId = `${templateId}-${randomBytes(4).toString("hex")}`;
-
-    // Create new workspace directory before registering with openclaw
-    const newWorkspaceDir = `/data/user-agents/workspace-${newAgentId}`;
-    await fs.mkdir(newWorkspaceDir, { recursive: true });
-
-    // Create the new agent via openclaw CLI, pointing it at the workspace
-    logger.info("Creating new agent via OpenClaw CLI", { newAgentId, name, workspace: newWorkspaceDir });
-    const ocResult = await openclawService.createAgent(newAgentId, { name, workspace: newWorkspaceDir });
-    logger.debug("OpenClaw agent created", { newAgentId, output: ocResult });
-
-    // Substitute {{VAR}} placeholders and write processed files
-    logger.info("Writing processed template files to new workspace", {
-      newWorkspaceDir,
-      files: templateFileNames,
-    });
-    for (const [file, content] of Object.entries(fileContents)) {
-      let processed = content;
-      for (const [varName, value] of Object.entries(placeholderVars)) {
-        processed = processed.replaceAll(`{{${varName}}}`, value);
-      }
-      // BOOTSTRAP.spawned.md is the bootstrap template for spawned agents;
-      // write it as BOOTSTRAP.md in the new workspace.
-      const outFile = file === "BOOTSTRAP.spawned.md" ? "BOOTSTRAP.md" : file;
-      await fs.writeFile(path.join(newWorkspaceDir, outFile), processed, "utf8");
-      logger.debug(`Written ${outFile}`, { newWorkspaceDir });
-    }
-
-    // Inherit model from template config/storage
-    const templateConfig = configManager.getAgentConfig(templateId);
-    const templateMeta = agentStorage.getAgent(templateId);
-    const model =
-      (templateConfig && templateConfig.model) ||
-      (templateMeta && templateMeta.model) ||
-      null;
-
-    // Persist agent config
-    const newAgentDir = `/data/user-agents/agents/${newAgentId}/agent`;
-    configManager.updateAgentInConfig(newAgentId, {
-      workspace: newWorkspaceDir,
-      agentDir: newAgentDir,
-      name,
-      ...(model && { model }),
-    });
-
-    // Save agent metadata
     const metadata = {
-      id: newAgentId,
-      name,
-      workspace: newWorkspaceDir,
-      agentDir: newAgentDir,
-      model,
-      template: templateId,
-      templateVars: placeholderVars,
+      id: agentId,
+      name: agentName,
+      workspace,
+      agentDir,
       createdAt: new Date().toISOString(),
       status: "created",
     };
-    const savedAgent = agentStorage.saveAgent(newAgentId, metadata);
+    const savedAgent = agentStorage.saveAgent(agentId, metadata);
 
-    logger.info("Agent created successfully", {
-      newAgentId,
-      name,
-      template: templateId,
-    });
+    logger.info("Agent created successfully", { agentId });
 
-    return res.status(201).json({
-      success: true,
-      agentId: newAgentId,
-      agent: savedAgent,
-    });
+    return res.status(201).json({ success: true, agentId, agent: savedAgent });
   } catch (error) {
-    logger.error("Create agent failed", error, {
-      templateId: req.body?.templateId,
-      name: req.body?.configVars?.AGENT_NAME,
-    });
-    return res
-      .status(500)
-      .json({ error: error.message || "Failed to create agent" });
+    logger.error("Create agent failed", error, { agentId: req.body?.agentId });
+    return res.status(500).json({ error: error.message || "Failed to create agent" });
   }
 };
 
@@ -259,47 +135,15 @@ export const getAgent = async (req, res) => {
 
 /**
  * GET /api/agents
- * List template agents by scanning /data/.openclaw/agents/ directly.
- * Each subdirectory is an agent; enriched with config and storage metadata.
+ * List all agents from the openclaw instance.
  */
 export const listAgents = async (req, res) => {
   try {
-    logger.info("GET /api/agents - List template agents from /data/.openclaw");
+    logger.info("GET /api/agents - List agents");
 
-    const openclawAgentsDir = "/data/.openclaw/agents";
+    const agents = await openclawService.listAgents();
 
-    let agentIds = [];
-    try {
-      const entries = await fs.readdir(openclawAgentsDir, {
-        withFileTypes: true,
-      });
-      agentIds = entries
-        .filter((e) => e.isDirectory() && e.name !== "main")
-        .map((e) => e.name);
-      logger.debug("Agent directories found in /data/.openclaw/agents", {
-        count: agentIds.length,
-      });
-    } catch (e) {
-      logger.warn("Could not read /data/.openclaw/agents directory", {
-        error: e.message,
-      });
-    }
-
-    const agents = agentIds.map((agentId) => {
-      const configAgent = configManager.getAgentConfig(agentId);
-      const storedAgent = agentStorage.getAgent(agentId);
-      return {
-        id: agentId,
-        workspace: `/data/.openclaw/workspace-${agentId}`,
-        agentDir: `/data/.openclaw/agents/${agentId}/agent`,
-        ...(storedAgent || {}),
-        ...(configAgent || {}),
-      };
-    });
-
-    logger.debug("Template agents listed from /data/.openclaw", {
-      count: agents.length,
-    });
+    logger.debug("Agents listed", { count: agents.length });
 
     return res.json({
       success: true,
