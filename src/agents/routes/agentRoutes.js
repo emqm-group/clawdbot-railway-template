@@ -35,9 +35,9 @@ router.get("/:agentId", agentController.getAgent);
 /**
  * PUT /api/agents/:agentId/config-files
  * Upload/replace agent config files into the agent's workspace.
- * Body: { files: { "AGENTS.md"?: "...", "IDENTITY.md"?: "...", "SOUL.md"?: "...", "TOOLS.md"?: "...", "USER.md"?: "...", "BOOTSTRAP.md"?: "...", "MEMORY.md"?: "..." } }
+ * Body: { files: { "AGENTS.md"?: "...", "IDENTITY.md"?: "...", "SOUL.md"?: "...", "TOOLS.md"?: "...", "USER.md"?: "...", "BOOTSTRAP.md"?: "...", "MEMORY.md"?: "...", "HEARTBEAT.md"?: "..." } }
  * Only the files included in the request are written; all others remain unchanged.
- * Allowed files: AGENTS.md, IDENTITY.md, SOUL.md, TOOLS.md, USER.md, BOOTSTRAP.md, MEMORY.md
+ * Allowed files: AGENTS.md, IDENTITY.md, SOUL.md, TOOLS.md, USER.md, BOOTSTRAP.md, MEMORY.md, HEARTBEAT.md
  */
 router.get("/:agentId/config-files", agentController.getConfigFiles);
 router.put("/:agentId/config-files", agentController.uploadConfigFiles);

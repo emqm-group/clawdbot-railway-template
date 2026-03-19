@@ -315,7 +315,7 @@ export const updateAgentConfig = async (req, res) => {
 export const getConfigFiles = async (req, res) => {
   const ALLOWED_FILES = [
     "AGENTS.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "USER.md",
-    "BOOTSTRAP.md", "MEMORY.md",
+    "BOOTSTRAP.md", "MEMORY.md", "HEARTBEAT.md",
   ];
 
   try {
@@ -372,7 +372,7 @@ export const getConfigFiles = async (req, res) => {
 export const uploadConfigFiles = async (req, res) => {
   const ALLOWED_FILES = new Set([
     "AGENTS.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "USER.md",
-    "BOOTSTRAP.md", "MEMORY.md",
+    "BOOTSTRAP.md", "MEMORY.md", "HEARTBEAT.md",
   ]);
 
   try {
