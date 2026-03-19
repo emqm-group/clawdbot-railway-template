@@ -28,7 +28,7 @@ export const createAgent = async (req, res) => {
     logger.info("POST /api/agents - Create agent", { agentId, name: agentName });
 
     const workspace = `/data/.openclaw/workspace-${agentId}`;
-    await openclawService.createAgent(agentId, { name: agentName, workspace });
+    await openclawService.createAgent(agentId, { workspace });
 
     const agentDir = `/data/.openclaw/agents/${agentId}/agent`;
     configManager.updateAgentInConfig(agentId, { workspace, agentDir, name: agentName });

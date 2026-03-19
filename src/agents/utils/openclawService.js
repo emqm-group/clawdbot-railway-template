@@ -21,11 +21,10 @@ class OpenClawService {
     try {
       const workspace =
         options.workspace || `/data/.openclaw/workspace-${agentId}`;
-      const name = options.name || agentId;
 
       // Run openclaw command to add agent with explicit workspace
       const command = `openclaw agents add ${agentId} --workspace ${workspace}`;
-      logger.command(command, { agentId, workspace, name });
+      logger.command(command, { agentId, workspace });
 
       const { stdout, stderr } = await execAsync(command);
 
@@ -35,15 +34,10 @@ class OpenClawService {
         stderr: stderr ? stderr.substring(0, 200) : null,
       });
 
-      if (stderr && !stderr.includes("successfully")) {
-        throw new Error(stderr);
-      }
-
       return {
         success: true,
         agentId,
         workspace,
-        name,
         message: `Agent ${agentId} created successfully`,
         output: stdout,
       };
