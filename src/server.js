@@ -753,6 +753,35 @@ function buildOnboardArgs(payload) {
   return args;
 }
 
+async function notifyOrchestrator(status, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
+  const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
+  const tenantId = process.env.TENANT_ID?.trim();
+
+  if (!orchestratorUrl || !orchestratorSecret || !tenantId) {
+    console.warn("[auto-setup] skipping orchestrator callback — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or TENANT_ID not set");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${orchestratorUrl}/internal/provision/callback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${orchestratorSecret}`,
+      },
+      body: JSON.stringify({ tenantId, status, ...(reason && { reason }) }),
+    });
+    if (res.ok) {
+      console.log(`[auto-setup] orchestrator notified: ${status}`);
+    } else {
+      console.warn(`[auto-setup] orchestrator callback returned ${res.status}`);
+    }
+  } catch (err) {
+    console.warn(`[auto-setup] orchestrator callback failed: ${String(err)}`);
+  }
+}
+
 /**
  * Auto-setup: runs the full openclaw onboard + gateway config on first boot
  * when OPENCLAW_AUTO_SETUP=true and the required env vars are present.
@@ -764,6 +793,7 @@ async function runAutoSetup() {
 
   if (!authChoice || !authSecret) {
     console.warn("[auto-setup] OPENCLAW_AUTH_CHOICE or OPENCLAW_AUTH_SECRET not set — skipping");
+    await notifyOrchestrator("failed", "OPENCLAW_AUTH_CHOICE or OPENCLAW_AUTH_SECRET not set");
     return;
   }
 
@@ -795,6 +825,7 @@ async function runAutoSetup() {
 
   if (!ok) {
     console.error(`[auto-setup] onboard failed (exit ${onboard.code}):\n${onboard.output}`);
+    await notifyOrchestrator("failed", `onboard exited with code ${onboard.code}`);
     return;
   }
 
@@ -866,8 +897,10 @@ async function runAutoSetup() {
   try {
     await ensureGatewayRunning();
     console.log("[auto-setup] gateway ready");
+    await notifyOrchestrator("ready");
   } catch (err) {
     console.error(`[auto-setup] gateway failed to start: ${String(err)}`);
+    await notifyOrchestrator("failed", `gateway failed to start: ${String(err)}`);
   }
 }
 
