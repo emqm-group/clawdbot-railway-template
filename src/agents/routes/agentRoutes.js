@@ -57,6 +57,12 @@ router.patch("/:agentId/config", agentController.updateAgentConfig);
 router.patch("/:agentId", agentController.updateAgent);
 
 /**
+ * POST /api/agents/:agentId/session/reset
+ * Clear all session transcripts for an agent so it starts fresh on the next turn.
+ */
+router.post("/:agentId/session/reset", agentController.resetAgentSession);
+
+/**
  * DELETE /api/agents/:agentId
  * Delete an agent
  */

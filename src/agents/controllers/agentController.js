@@ -569,3 +569,35 @@ export const deleteAgent = async (req, res) => {
     res.status(500).json({ error: error.message || "Failed to delete agent" });
   }
 };
+
+/**
+ * POST /api/agents/:agentId/session/reset
+ * Clear all session transcripts for an agent so it starts fresh on the next turn.
+ * Use this after updating identity-critical config files (SOUL.md, IDENTITY.md, TOOLS.md)
+ * where stale session history would override the new content.
+ */
+export const resetAgentSession = async (req, res) => {
+  const { agentId } = req.params;
+  try {
+    logger.info("POST /api/agents/:agentId/session/reset - Reset agent session", { agentId });
+
+    const agent = agentStorage.getAgent(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: `Agent ${agentId} not found` });
+    }
+
+    const { sessionKey } = req.body ?? {};
+    const result = await openclawService.resetAgentSession(agentId, sessionKey);
+    return res.json({
+      success: true,
+      agentId,
+      results: result.results,
+      message: result.results.length > 0
+        ? `Reset ${result.results.length} session(s)`
+        : "No active sessions found — nothing to reset",
+    });
+  } catch (error) {
+    logger.error("Reset agent session failed", error, { agentId: req.params?.agentId });
+    return res.status(500).json({ error: error.message || "Failed to reset session" });
+  }
+};

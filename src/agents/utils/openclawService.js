@@ -249,6 +249,70 @@ class OpenClawService {
   }
 
   /**
+   * Reset all active sessions for an agent via the gateway's sessions.reset RPC.
+   * Mirrors what the openclaw TUI does when you type /reset or /new:
+   * archives transcripts, aborts active runs, clears queues.
+   *
+   * Requires the gateway to be running. Uses `openclaw gateway call` to invoke
+   * the RPC without needing a full WebSocket client.
+   *
+   * @param {string} agentId
+   * @param {string} [sessionKey] - specific session key to reset; if omitted, resets all sessions for the agent
+   * @returns {Promise<{ success: boolean, results: object[] }>}
+   */
+  async resetAgentSession(agentId, sessionKey) {
+    // If a specific session key is provided, reset just that one
+    if (sessionKey) {
+      return this._resetSessionByKey(agentId, sessionKey);
+    }
+
+    // Otherwise list all sessions and reset any belonging to this agent
+    let sessions = [];
+    try {
+      const command = `openclaw gateway call sessions.list --json`;
+      logger.command(command);
+      const { stdout } = await execAsync(command);
+      const parsed = JSON.parse(stdout);
+      // Response may be { sessions: [...] } or a bare array
+      const all = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
+      // Session keys follow the format "agent:<agentId>:<scope>"
+      sessions = all.filter((s) => s.key?.startsWith(`agent:${agentId}:`));
+    } catch (err) {
+      logger.warn("resetAgentSession: could not list sessions", { error: err.message });
+    }
+
+    if (sessions.length === 0) {
+      logger.info("resetAgentSession: no active sessions found for agent", { agentId });
+      return { success: true, results: [] };
+    }
+
+    const results = [];
+    for (const session of sessions) {
+      const key = session.key ?? session.sessionKey;
+      if (!key) continue;
+      const result = await this._resetSessionByKey(agentId, key);
+      results.push({ key, ...result });
+    }
+
+    return { success: true, results };
+  }
+
+  async _resetSessionByKey(agentId, sessionKey) {
+    try {
+      const payload = JSON.stringify({ key: sessionKey, reason: "reset" });
+      const command = `openclaw gateway call sessions.reset --json --params '${payload}'`;
+      logger.command(command, { agentId, sessionKey });
+      const { stdout } = await execAsync(command);
+      logger.info("resetAgentSession: session reset via gateway RPC", { agentId, sessionKey });
+      return { success: true, output: stdout.trim() };
+    } catch (err) {
+      const details = (err.stderr || err.stdout || err.message || "").trim();
+      logger.error("resetAgentSession: gateway RPC failed", { agentId, sessionKey, details });
+      return { success: false, error: details };
+    }
+  }
+
+  /**
    * Validate an openclaw.json config object before writing.
    * Writes to a temp file and runs `openclaw config validate` against it.
    * @param {object} config - Config object to validate
