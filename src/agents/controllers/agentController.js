@@ -146,8 +146,21 @@ export const updateConfig = async (req, res) => {
       });
     }
 
+    const prevConfig = configManager.readConfig();
+    const prevAgents = prevConfig.agents?.list?.map((a) => a.id) ?? [];
+
     configManager.writeConfig(config);
-    logger.info("openclaw.json updated successfully");
+
+    const nextAgents = config.agents?.list?.map((a) => a.id) ?? [];
+    const added = nextAgents.filter((id) => !prevAgents.includes(id));
+    const removed = prevAgents.filter((id) => !nextAgents.includes(id));
+
+    logger.info("openclaw.json updated successfully", {
+      agentsBefore: prevAgents,
+      agentsAfter: nextAgents,
+      added,
+      removed,
+    });
 
     // Poll gateway health to confirm it absorbed the change cleanly
     const health = await openclawService.pollGatewayHealth();
