@@ -122,6 +122,117 @@ export const getConfig = async (_req, res) => {
   }
 };
 
+const GATEWAY_RESTART_WARNING =
+  "This change requires a manual gateway restart to take effect — call POST /api/gateway/restart to apply it.";
+const MODEL_FORMAT = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.:/+.-]+$/;
+
+/**
+ * Validates a proposed openclaw.json update against the current config.
+ * Returns hard errors (write blocked) and warnings (write allowed but flagged).
+ */
+function validateConfigChange(prevConfig, newConfig) {
+  const errors = [];
+  const warnings = [];
+
+  const prevAgents = prevConfig.agents?.list ?? [];
+  const newAgents = newConfig.agents?.list ?? [];
+  const newAgentIds = new Set(newAgents.map((a) => a.id));
+
+  // 1. Agent removal — must use DELETE /api/agents/:agentId instead
+  for (const agent of prevAgents) {
+    if (!newAgentIds.has(agent.id)) {
+      errors.push(
+        `Agent "${agent.id}" exists in the system but is missing from the new config. ` +
+        `Use DELETE /api/agents/${agent.id} to remove agents.`
+      );
+    }
+  }
+
+  // 2. agentDir uniqueness — sharing causes immediate session/state corruption
+  const seenDirs = new Set();
+  for (const agent of newAgents) {
+    if (!agent.agentDir) continue;
+    if (seenDirs.has(agent.agentDir)) {
+      errors.push(
+        `agentDir "${agent.agentDir}" is shared by multiple agents. Each agent must have a unique agentDir.`
+      );
+    }
+    seenDirs.add(agent.agentDir);
+  }
+
+  // 3. Gateway token mismatch — would break all gateway connections on hot-reload
+  const envToken = process.env.OPENCLAW_GATEWAY_TOKEN?.trim();
+  const newToken = newConfig.gateway?.auth?.token;
+  if (envToken && newToken && newToken !== envToken) {
+    errors.push(
+      `gateway.auth.token in the new config does not match the OPENCLAW_GATEWAY_TOKEN env var. ` +
+      `This would break all gateway connections after hot-reload.`
+    );
+  }
+
+  // 4. Dangling bindings — silent routing failure
+  for (const binding of newConfig.bindings ?? []) {
+    const agentId = binding.agent ?? binding.agentId;
+    if (agentId && !newAgentIds.has(agentId)) {
+      errors.push(
+        `Binding references agent "${agentId}" which does not exist in agents.list.`
+      );
+    }
+  }
+
+  // 5. workspace or agentDir path change for existing agents — loses files and sessions
+  const prevAgentMap = new Map(prevAgents.map((a) => [a.id, a]));
+  for (const newAgent of newAgents) {
+    const prev = prevAgentMap.get(newAgent.id);
+    if (!prev) continue;
+    if (prev.workspace && newAgent.workspace && prev.workspace !== newAgent.workspace) {
+      warnings.push(
+        `Agent "${newAgent.id}" workspace changed from "${prev.workspace}" to "${newAgent.workspace}". ` +
+        `The agent will lose access to its config files (AGENTS.md, SOUL.md, memory, etc).`
+      );
+    }
+    if (prev.agentDir && newAgent.agentDir && prev.agentDir !== newAgent.agentDir) {
+      warnings.push(
+        `Agent "${newAgent.id}" agentDir changed from "${prev.agentDir}" to "${newAgent.agentDir}". ` +
+        `The agent will lose its sessions and state.`
+      );
+    }
+  }
+
+  // 6. gateway.bind or gateway.port change — requires restart, hot-reload won't apply
+  const prevBind = prevConfig.gateway?.bind;
+  const newBind = newConfig.gateway?.bind;
+  if (prevBind && newBind && prevBind !== newBind) {
+    warnings.push(`gateway.bind changed from "${prevBind}" to "${newBind}". ${GATEWAY_RESTART_WARNING}`);
+  }
+  const prevPort = prevConfig.gateway?.port;
+  const newPort = newConfig.gateway?.port;
+  if (prevPort && newPort && String(prevPort) !== String(newPort)) {
+    warnings.push(`gateway.port changed from ${prevPort} to ${newPort}. ${GATEWAY_RESTART_WARNING}`);
+  }
+
+  // 7. Model format — must be "provider/modelId"
+  const modelsToCheck = [];
+  if (newConfig.agents?.defaults?.model) {
+    modelsToCheck.push({ path: "agents.defaults.model", value: newConfig.agents.defaults.model });
+  }
+  for (const agent of newAgents) {
+    if (agent.model && typeof agent.model === "string") {
+      modelsToCheck.push({ path: `agents.list[${agent.id}].model`, value: agent.model });
+    }
+  }
+  for (const { path: modelPath, value } of modelsToCheck) {
+    if (!MODEL_FORMAT.test(value)) {
+      warnings.push(
+        `${modelPath} "${value}" does not match expected format "provider/modelId" ` +
+        `(e.g. "anthropic/claude-sonnet-4-6"). Agent turns may fail.`
+      );
+    }
+  }
+
+  return { errors, warnings };
+}
+
 /**
  * PUT /api/agents/config
  * Replace the full openclaw.json config
@@ -147,8 +258,19 @@ export const updateConfig = async (req, res) => {
     }
 
     const prevConfig = configManager.readConfig();
-    const prevAgents = prevConfig.agents?.list?.map((a) => a.id) ?? [];
 
+    // Run guardrail checks against current config
+    const { errors, warnings } = validateConfigChange(prevConfig, config);
+    if (errors.length > 0) {
+      logger.warn("Config update blocked by guardrails", { errors });
+      return res.status(400).json({
+        error: "Config update blocked",
+        errors,
+        ...(warnings.length > 0 && { warnings }),
+      });
+    }
+
+    const prevAgents = prevConfig.agents?.list?.map((a) => a.id) ?? [];
     configManager.writeConfig(config);
 
     const nextAgents = config.agents?.list?.map((a) => a.id) ?? [];
@@ -160,6 +282,7 @@ export const updateConfig = async (req, res) => {
       agentsAfter: nextAgents,
       added,
       removed,
+      warnings,
     });
 
     // Poll gateway health to confirm it absorbed the change cleanly
@@ -172,6 +295,7 @@ export const updateConfig = async (req, res) => {
         gatewayDetails: health.details,
         path: configManager.configPath,
         config,
+        ...(warnings.length > 0 && { warnings }),
       });
     }
 
@@ -180,6 +304,7 @@ export const updateConfig = async (req, res) => {
       path: configManager.configPath,
       config,
       gateway: { healthy: true, details: health.details },
+      ...(warnings.length > 0 && { warnings }),
     });
   } catch (error) {
     logger.error("Update config failed", error);

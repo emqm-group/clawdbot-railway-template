@@ -313,6 +313,25 @@ class OpenClawService {
   }
 
   /**
+   * Restart the openclaw gateway.
+   * @returns {Promise<{ success: boolean, details: string }>}
+   */
+  async restartGateway() {
+    try {
+      const command = `openclaw gateway restart`;
+      logger.command(command);
+      const { stdout, stderr } = await execAsync(command);
+      const details = (stdout || stderr || "").trim();
+      logger.info("Gateway restarted successfully", { details });
+      return { success: true, details };
+    } catch (error) {
+      const details = (error.stderr || error.stdout || error.message || "").trim();
+      logger.error("Gateway restart failed", { details });
+      return { success: false, details };
+    }
+  }
+
+  /**
    * Validate an openclaw.json config object before writing.
    * Writes to a temp file and runs `openclaw config validate` against it.
    * @param {object} config - Config object to validate

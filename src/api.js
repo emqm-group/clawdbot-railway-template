@@ -6,6 +6,7 @@
 import agentRoutes from "./agents/routes/agentRoutes.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
+import openclawService from "./agents/utils/openclawService.js";
 
 export function setupApiRoutes(app, jwtSecret) {
   // --- Agent Management API Routes ---
@@ -21,6 +22,24 @@ export function setupApiRoutes(app, jwtSecret) {
   });
 
   app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
+
+  /**
+   * POST /api/gateway/restart
+   * Restart the openclaw gateway. Required after gateway.bind or gateway.port changes.
+   */
+  app.post("/api/gateway/restart", authMiddleware(jwtSecret), async (_req, res) => {
+    try {
+      logger.info("POST /api/gateway/restart");
+      const result = await openclawService.restartGateway();
+      if (!result.success) {
+        return res.status(500).json({ error: "Gateway restart failed", details: result.details });
+      }
+      return res.json({ success: true, details: result.details });
+    } catch (error) {
+      logger.error("Gateway restart endpoint failed", error);
+      return res.status(500).json({ error: error.message || "Failed to restart gateway" });
+    }
+  });
 
   // Catch-all 404 for unmapped /api/* routes
   // This prevents /api/* from ever reaching the gateway proxy
