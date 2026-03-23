@@ -4,6 +4,7 @@
  * This file handles ONLY /api/* routes and never touches the gateway
  */
 import agentRoutes from "./agents/routes/agentRoutes.js";
+import fileRoutes from "./agents/routes/fileRoutes.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 
@@ -21,6 +22,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway) {
   });
 
   app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
+  app.use("/api/files", authMiddleware(jwtSecret), fileRoutes);
 
   /**
    * POST /api/gateway/restart
