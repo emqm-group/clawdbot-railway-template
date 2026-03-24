@@ -375,6 +375,27 @@ class OpenClawService {
   }
 
   /**
+   * Approve a device pairing request by requestId.
+   * Runs `openclaw devices approve <requestId>`.
+   * @param {string} requestId
+   * @returns {Promise<{ success: boolean, output: string }>}
+   */
+  async approveDevice(requestId) {
+    try {
+      const command = `openclaw devices approve ${requestId}`;
+      logger.command(command, { requestId });
+      const { stdout, stderr } = await execAsync(command);
+      const output = (stdout || stderr || "").trim();
+      logger.info("approveDevice: approved", { requestId });
+      return { success: true, output };
+    } catch (error) {
+      const details = (error.stderr || error.stdout || error.message || "").trim();
+      logger.error("approveDevice failed", { requestId, details });
+      throw { statusCode: 500, message: details || `Failed to approve device ${requestId}` };
+    }
+  }
+
+  /**
    * Get OpenClaw gateway status
    * @returns {Promise<object>} - Gateway status
    */

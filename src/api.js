@@ -7,6 +7,7 @@ import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
+import openclawService from "./agents/utils/openclawService.js";
 
 export function setupApiRoutes(app, jwtSecret, restartGateway) {
   // --- Agent Management API Routes ---
@@ -23,6 +24,27 @@ export function setupApiRoutes(app, jwtSecret, restartGateway) {
 
   app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
   app.use("/api/files", authMiddleware(jwtSecret), fileRoutes);
+
+  /**
+   * POST /api/devices/approve
+   * Approve a device pairing request.
+   * Body: { requestId: string }
+   */
+  app.post("/api/devices/approve", authMiddleware(jwtSecret), async (req, res) => {
+    const requestId = String(req.body?.requestId || "").trim();
+    if (!requestId) {
+      return res.status(400).json({ error: "requestId is required" });
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(requestId)) {
+      return res.status(400).json({ error: "Invalid requestId" });
+    }
+    try {
+      const result = await openclawService.approveDevice(requestId);
+      return res.json({ success: true, ...result });
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({ error: error.message });
+    }
+  });
 
   /**
    * POST /api/gateway/restart

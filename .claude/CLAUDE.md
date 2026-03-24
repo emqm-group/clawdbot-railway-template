@@ -108,7 +108,7 @@ channels: { telegram, discord, slack, whatsapp, signal, ... }
 session: { dmScope, reset, ... }
 tools: { profile, allow, deny, exec, ... }
 skills: { entries, allowBundled, ... }
-bindings: [{ agent, match: { channel, peer } }]
+bindings: [{ agentId, match: { channel, peer } }]
 ```
 
 ## Gateway auth modes
