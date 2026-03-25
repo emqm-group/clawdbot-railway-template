@@ -17,3 +17,6 @@ npm-debug.log*
 agent-configs/
 plugins/
 skills/
+
+# Claude
+.claude/
