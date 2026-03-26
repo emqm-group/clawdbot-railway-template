@@ -5,6 +5,7 @@
  */
 import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
+import { createToolsRouter } from "./agents/routes/toolsRoutes.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 import openclawService from "./agents/utils/openclawService.js";
@@ -24,6 +25,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway) {
 
   app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
   app.use("/api/files", authMiddleware(jwtSecret), fileRoutes);
+  app.use("/api/tools", createToolsRouter(process.env.ORCHESTRATOR_SECRET?.trim(), restartGateway));
 
   /**
    * POST /api/devices/approve

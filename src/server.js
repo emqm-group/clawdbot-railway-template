@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 
 import express from "express";
@@ -39,6 +40,8 @@ for (const suffix of [
 // boot but the Railway domain will be routed to a different port.
 //
 // OPENCLAW_PUBLIC_PORT is kept as an escape hatch for non-Railway deployments.
+const APP_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
 const PORT = Number.parseInt(
   process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000",
   10,
@@ -903,6 +906,11 @@ async function runAutoSetup() {
   // Enable session tools visibility for all agents
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "tools.sessions.visibility", "all"]));
   console.log("[auto-setup] tools.sessions.visibility set to all");
+
+  // Register composio-tools plugin
+  const composioPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "composio-tools");
+  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "install", "--link", composioPluginPath]));
+  console.log("[auto-setup] composio-tools plugin registered");
 
   console.log("[auto-setup] setup complete — starting gateway...");
   try {
