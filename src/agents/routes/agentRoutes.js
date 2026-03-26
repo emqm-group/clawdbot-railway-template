@@ -28,6 +28,13 @@ router.put("/config", agentController.updateConfig);
 router.get("/:agentId/vars", agentController.getTemplateVars);
 
 /**
+ * PUT /api/agents/batch/config-files
+ * Write config files for multiple agents and optionally reset their sessions.
+ * Body: { agents: [{ agentId, files }], resetSessions?: boolean }
+ */
+router.put("/batch/config-files", agentController.batchUpdateConfigFiles);
+
+/**
  * GET /api/agents/:agentId - Get agent details
  */
 router.get("/:agentId", agentController.getAgent);

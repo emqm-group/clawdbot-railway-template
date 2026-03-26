@@ -630,6 +630,138 @@ export const uploadConfigFiles = async (req, res) => {
 };
 
 /**
+ * PUT /api/agents/batch/config-files
+ * Write config files for multiple agents and optionally reset their sessions.
+ *
+ * Body:
+ *   {
+ *     agents: [{ agentId: string, files: { "AGENTS.md"?: string, ... } }, ...],
+ *     resetSessions?: boolean  // default true
+ *   }
+ *
+ * Each agent is processed independently. Failures for one agent do not abort others.
+ * Returns per-agent results; HTTP 207 if any agent failed, 200 if all succeeded.
+ */
+export const batchUpdateConfigFiles = async (req, res) => {
+  const ALLOWED_FILES = new Set([
+    "AGENTS.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "USER.md",
+    "BOOTSTRAP.md", "MEMORY.md", "HEARTBEAT.md",
+  ]);
+
+  try {
+    const { agents, resetSessions = true } = req.body;
+
+    if (!Array.isArray(agents) || agents.length === 0) {
+      return res.status(400).json({ error: "'agents' must be a non-empty array" });
+    }
+
+    logger.info("PUT /api/agents/batch/config-files - Batch update config files", {
+      agentCount: agents.length,
+      resetSessions,
+    });
+
+    const results = [];
+    let anyFailed = false;
+
+    for (const entry of agents) {
+      const { agentId, files } = entry;
+
+      if (!agentId) {
+        results.push({ agentId: null, success: false, error: "agentId is required" });
+        anyFailed = true;
+        continue;
+      }
+
+      if (!files || typeof files !== "object" || Array.isArray(files)) {
+        results.push({ agentId, success: false, error: "'files' must be an object" });
+        anyFailed = true;
+        continue;
+      }
+
+      if (Object.keys(files).length === 0) {
+        results.push({ agentId, success: false, error: "At least one file must be provided" });
+        anyFailed = true;
+        continue;
+      }
+
+      const unknownFiles = Object.keys(files).filter((f) => !ALLOWED_FILES.has(f));
+      if (unknownFiles.length > 0) {
+        results.push({ agentId, success: false, error: "Unknown file names", unknownFiles });
+        anyFailed = true;
+        continue;
+      }
+
+      const invalidFiles = Object.entries(files)
+        .filter(([, v]) => typeof v !== "string")
+        .map(([k]) => k);
+      if (invalidFiles.length > 0) {
+        results.push({ agentId, success: false, error: "File contents must be strings", invalidFiles });
+        anyFailed = true;
+        continue;
+      }
+
+      // Resolve workspace
+      const storedAgent = agentStorage.getAgent(agentId);
+      let workspaceDir = storedAgent?.workspace || null;
+
+      if (!workspaceDir) {
+        const agentDir = `/data/.openclaw/agents/${agentId}`;
+        try {
+          await fs.stat(agentDir);
+          workspaceDir = `/data/.openclaw/workspace-${agentId}`;
+        } catch {
+          results.push({ agentId, success: false, error: `Agent ${agentId} not found` });
+          anyFailed = true;
+          continue;
+        }
+      }
+
+      // Write files
+      try {
+        await fs.mkdir(workspaceDir, { recursive: true });
+        const written = [];
+        for (const [fileName, content] of Object.entries(files)) {
+          await fs.writeFile(path.join(workspaceDir, fileName), content, "utf8");
+          written.push(fileName);
+        }
+        logger.info("Batch: config files written", { agentId, written });
+
+        // Reset sessions
+        let sessionReset = null;
+        if (resetSessions) {
+          try {
+            const result = await openclawService.resetAgentSession(agentId);
+            sessionReset = {
+              success: true,
+              sessionsReset: result.results.length,
+            };
+            logger.info("Batch: session reset", { agentId, sessionsReset: result.results.length });
+          } catch (resetErr) {
+            sessionReset = { success: false, error: resetErr.message };
+            logger.warn("Batch: session reset failed (files were written)", { agentId, error: resetErr.message });
+          }
+        }
+
+        results.push({ agentId, success: true, written, workspaceDir, ...(resetSessions && { sessionReset }) });
+      } catch (writeErr) {
+        logger.error("Batch: failed to write config files", { agentId, error: writeErr.message });
+        results.push({ agentId, success: false, error: writeErr.message });
+        anyFailed = true;
+      }
+    }
+
+    const status = anyFailed ? 207 : 200;
+    return res.status(status).json({
+      success: !anyFailed,
+      results,
+    });
+  } catch (error) {
+    logger.error("Batch update config files failed", error);
+    return res.status(500).json({ error: error.message || "Failed to batch update config files" });
+  }
+};
+
+/**
  * DELETE /api/agents/:agentId
  * Delete an agent
  * Template agents (those with a /templates/ subdirectory in their workspace) cannot be deleted.
