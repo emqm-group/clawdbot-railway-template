@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 const MANIFEST_PATH = path.join(
   process.env.OPENCLAW_STATE_DIR || "/data/.openclaw",
@@ -19,49 +18,45 @@ function readManifest() {
   }
 }
 
-export default definePluginEntry({
-  id: "composio-tools",
-  name: "Composio Tools",
-  register(api) {
-    const { tools } = readManifest();
+export default function (api) {
+  const { tools } = readManifest();
 
-    for (const entry of tools) {
-      const { name, description, parameters } = entry;
+  for (const entry of tools) {
+    const { name, description, parameters } = entry;
 
-      api.registerTool(
-        (ctx) => ({
-          name,
-          description,
-          parameters,
-          async execute(_toolCallId, params) {
-            const agentId = ctx.agentId;
-            try {
-              const res = await fetch(INVOKE_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ agent_id: agentId, tool: name, params }),
-              });
+    api.registerTool(
+      (ctx) => ({
+        name,
+        description,
+        parameters,
+        async execute(_toolCallId, params) {
+          const agentId = ctx.agentId;
+          try {
+            const res = await fetch(INVOKE_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ agent_id: agentId, tool: name, params }),
+            });
 
-              const data = await res.json();
+            const data = await res.json();
 
-              if (!res.ok) {
-                return {
-                  content: [{ type: "text", text: `Tool error [${data.code ?? res.status}]: ${data.message ?? JSON.stringify(data)}` }],
-                };
-              }
-
+            if (!res.ok) {
               return {
-                content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }],
-              };
-            } catch (err) {
-              return {
-                content: [{ type: "text", text: `Tool invocation failed: ${err.message}` }],
+                content: [{ type: "text", text: `Tool error [${data.code ?? res.status}]: ${data.message ?? JSON.stringify(data)}` }],
               };
             }
-          },
-        }),
-        { optional: true }
-      );
-    }
-  },
-});
+
+            return {
+              content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }],
+            };
+          } catch (err) {
+            return {
+              content: [{ type: "text", text: `Tool invocation failed: ${err.message}` }],
+            };
+          }
+        },
+      }),
+      { optional: true }
+    );
+  }
+}
