@@ -910,7 +910,8 @@ async function runAutoSetup() {
   // Register composio-tools plugin
   const composioPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "composio-tools");
   await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "install", "--link", composioPluginPath]));
-  console.log("[auto-setup] composio-tools plugin registered");
+  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", "composio-tools"]));
+  console.log("[auto-setup] composio-tools plugin registered and enabled");
 
   console.log("[auto-setup] setup complete — starting gateway...");
   try {

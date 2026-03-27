@@ -1,9 +1,59 @@
 import logger from "../utils/logger.js";
 import { applyToolsUpdate } from "../utils/toolsManifest.js";
+import configManager from "../utils/configManager.js";
 
 const ORCHESTRATOR_URL = () => process.env.ORCHESTRATOR_URL?.trim();
 const ORCHESTRATOR_SECRET = () => process.env.ORCHESTRATOR_SECRET?.trim();
 const TENANT_ID = () => process.env.TENANT_ID?.trim();
+
+/**
+ * Patch tools.allow for one agent or all agents (when agentId is null).
+ * Non-fatal — logs errors but does not throw.
+ */
+async function applyAgentToolsAllow(action, agentId, tools) {
+  const toolNames = tools.map((t) => t.name);
+
+  let agentIds;
+  if (agentId) {
+    agentIds = [agentId];
+  } else {
+    // Global — apply to all agents currently in the config.
+    try {
+      const config = configManager.readConfig();
+      agentIds = (config.agents?.list ?? []).map((a) => a.id);
+    } catch (err) {
+      logger.error("toolsController: failed to read config for global tools.allow patch", { error: err.message });
+      return;
+    }
+  }
+
+  for (const id of agentIds) {
+    try {
+      const existing = configManager.getAgentConfig(id);
+      if (!existing) {
+        logger.warn("toolsController: agent not found in config, skipping tools.allow patch", { agentId: id });
+        continue;
+      }
+
+      const currentAllow = existing.tools?.allow ?? [];
+
+      let newAllow;
+      if (action === "add") {
+        const toAdd = toolNames.filter((n) => !currentAllow.includes(n));
+        newAllow = [...currentAllow, ...toAdd];
+      } else {
+        const toRemove = new Set(toolNames);
+        newAllow = currentAllow.filter((n) => !toRemove.has(n));
+      }
+
+      const newTools = { ...(existing.tools ?? {}), allow: newAllow };
+      await configManager.patchAgentConfig(id, { tools: newTools });
+      logger.info("toolsController: patched agent tools.allow", { agentId: id, action, toolNames });
+    } catch (err) {
+      logger.error("toolsController: failed to patch agent tools.allow", { agentId: id, error: err.message });
+    }
+  }
+}
 
 /**
  * POST /api/tools/register
@@ -26,6 +76,9 @@ export async function register(req, res, restartGateway) {
     logger.error("toolsController.register: manifest update failed", { error: err.message });
     return res.status(500).json({ error: "Failed to update tools manifest" });
   }
+
+  // Patch the agent's tools.allow in openclaw.json before restarting the gateway.
+  await applyAgentToolsAllow(action, agent_id, tools);
 
   // Respond immediately — gateway restart is async
   res.json({ ok: true });
