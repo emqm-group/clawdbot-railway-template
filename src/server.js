@@ -903,6 +903,10 @@ async function runAutoSetup() {
     console.log(`[auto-setup] default model set to ${defaultModel}`);
   }
 
+  // Enable /v1/responses HTTP endpoint (required for webchat)
+  await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "gateway.http.endpoints.responses.enabled", "true"]));
+  console.log("[auto-setup] gateway.http.endpoints.responses.enabled set to true");
+
   // Enable session tools visibility for all agents
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "tools.sessions.visibility", "all"]));
   console.log("[auto-setup] tools.sessions.visibility set to all");
