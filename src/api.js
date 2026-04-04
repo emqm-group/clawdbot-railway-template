@@ -49,6 +49,25 @@ export function setupApiRoutes(app, jwtSecret, restartGateway) {
   });
 
   /**
+   * POST /api/system/heartbeat
+   * Enable or disable the system-wide heartbeat across all agents.
+   * Runtime toggle — does not modify openclaw.json; state lost on gateway restart.
+   * Body: { action: "enable" | "disable" }
+   */
+  app.post("/api/system/heartbeat", authMiddleware(jwtSecret), async (req, res) => {
+    const action = String(req.body?.action || "").trim();
+    if (action !== "enable" && action !== "disable") {
+      return res.status(400).json({ error: 'action must be "enable" or "disable"' });
+    }
+    try {
+      const result = await openclawService.setHeartbeat(action);
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({ error: error.message });
+    }
+  });
+
+  /**
    * POST /api/gateway/restart
    * Restart the openclaw gateway. Required after gateway.bind or gateway.port changes.
    */

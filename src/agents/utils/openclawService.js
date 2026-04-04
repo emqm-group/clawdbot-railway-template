@@ -396,6 +396,34 @@ class OpenClawService {
   }
 
   /**
+   * Enable or disable the system-wide heartbeat.
+   * Calls `openclaw system heartbeat enable|disable` — runtime toggle, no config file change.
+   * State does not survive a gateway restart.
+   * @param {"enable"|"disable"} action
+   * @returns {Promise<{ success: boolean, action: string }>}
+   */
+  async setHeartbeat(action) {
+    if (action !== "enable" && action !== "disable") {
+      throw { statusCode: 400, message: 'action must be "enable" or "disable"' };
+    }
+    try {
+      const command = `openclaw system heartbeat ${action}`;
+      logger.command(command);
+      const { stdout, stderr } = await execAsync(command);
+      logger.commandResult(command, {
+        success: true,
+        stdout: stdout.substring(0, 200),
+        stderr: stderr ? stderr.substring(0, 200) : null,
+      });
+      return { success: true, action };
+    } catch (error) {
+      const details = (error.stderr || error.stdout || error.message || "").trim();
+      logger.error("setHeartbeat failed", { action, details });
+      throw { statusCode: 500, message: details || `Failed to ${action} heartbeat` };
+    }
+  }
+
+  /**
    * Get OpenClaw gateway status
    * @returns {Promise<object>} - Gateway status
    */
