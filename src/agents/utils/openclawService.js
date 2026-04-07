@@ -398,7 +398,6 @@ class OpenClawService {
   /**
    * Enable or disable the system-wide heartbeat.
    * Calls `openclaw system heartbeat enable|disable` — runtime toggle, no config file change.
-   * State does not survive a gateway restart.
    * @param {"enable"|"disable"} action
    * @returns {Promise<{ success: boolean, action: string }>}
    */

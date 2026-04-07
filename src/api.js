@@ -51,7 +51,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway) {
   /**
    * POST /api/system/heartbeat
    * Enable or disable the system-wide heartbeat across all agents.
-   * Runtime toggle — does not modify openclaw.json; state lost on gateway restart.
+   * Runtime toggle — does not modify openclaw.json.
    * Body: { action: "enable" | "disable" }
    */
   app.post("/api/system/heartbeat", authMiddleware(jwtSecret), async (req, res) => {
