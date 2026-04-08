@@ -423,6 +423,46 @@ class OpenClawService {
   }
 
   /**
+   * Get gateway-wide usage cost summary.
+   * Wraps `openclaw gateway usage-cost --days N --json`.
+   * @param {number} days - Number of days to include (default 30)
+   * @returns {Promise<object>} - CostUsageSummary with daily breakdown and totals
+   */
+  async getUsageCost(days = 30) {
+    const d = Math.max(1, Math.min(365, parseInt(days) || 30));
+    const command = `openclaw gateway usage-cost --days ${d} --json`;
+    logger.command(command);
+    const { stdout } = await execAsync(command);
+    return JSON.parse(stdout);
+  }
+
+  /**
+   * List all active sessions via gateway RPC.
+   * @returns {Promise<object[]>} - Array of session objects (key, inputTokens, outputTokens, ...)
+   */
+  async getSessionsList() {
+    const command = `openclaw gateway call sessions.list --json`;
+    logger.command(command);
+    const { stdout } = await execAsync(command);
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
+  }
+
+  /**
+   * Get detailed usage (with USD cost) for a specific session key.
+   * Wraps `sessions.usage` gateway RPC.
+   * @param {string} sessionKey - e.g. "agent:ceo-agent:main"
+   * @returns {Promise<object>} - Full usage object with totals, dailyBreakdown, modelUsage, etc.
+   */
+  async getSessionUsage(sessionKey) {
+    const payload = JSON.stringify({ key: sessionKey });
+    const command = `openclaw gateway call sessions.usage --json --params '${payload}'`;
+    logger.command(command, { sessionKey });
+    const { stdout } = await execAsync(command);
+    return JSON.parse(stdout);
+  }
+
+  /**
    * Get OpenClaw gateway status
    * @returns {Promise<object>} - Gateway status
    */
