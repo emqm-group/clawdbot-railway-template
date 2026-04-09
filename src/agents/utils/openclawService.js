@@ -428,10 +428,19 @@ class OpenClawService {
    * @param {number} days - Number of days to include (default 30)
    * @returns {Promise<object>} - CostUsageSummary with daily breakdown and totals
    */
-  async getUsageCost(days = 30) {
-    const d = Math.max(1, Math.min(365, parseInt(days) || 30));
-    const command = `openclaw gateway usage-cost --days ${d} --json`;
-    logger.command(command);
+  async getUsageCost({ days, startDate, endDate } = {}) {
+    // Prefer startDate/endDate when provided; fall back to days (default 30).
+    // `openclaw gateway usage-cost` CLI only supports --days, so use the raw
+    // RPC call when explicit dates are needed.
+    let command;
+    if (startDate && endDate) {
+      const payload = JSON.stringify({ startDate, endDate });
+      command = `openclaw gateway call usage.cost --json --params '${payload}'`;
+    } else {
+      const d = Math.max(1, Math.min(365, parseInt(days) || 30));
+      command = `openclaw gateway call usage.cost --json --params '{"days":${d}}'`;
+    }
+    logger.command(command, { days, startDate, endDate });
     try {
       const { stdout } = await execAsync(command);
       return JSON.parse(stdout);
@@ -473,10 +482,13 @@ class OpenClawService {
    * @param {string} sessionKey - e.g. "agent:ceo-agent:main"
    * @returns {Promise<object>} - Full usage object with totals, dailyBreakdown, modelUsage, etc.
    */
-  async getSessionUsage(sessionKey) {
-    const payload = JSON.stringify({ key: sessionKey });
+  async getSessionUsage(sessionKey, { startDate, endDate } = {}) {
+    const params = { key: sessionKey };
+    if (startDate) params.startDate = startDate;
+    if (endDate) params.endDate = endDate;
+    const payload = JSON.stringify(params);
     const command = `openclaw gateway call sessions.usage --json --params '${payload}'`;
-    logger.command(command, { sessionKey });
+    logger.command(command, { sessionKey, startDate, endDate });
     try {
       const { stdout } = await execAsync(command);
       return JSON.parse(stdout);

@@ -10,6 +10,14 @@ function extractAgentId(key) {
 }
 
 /**
+ * Validate and return a YYYY-MM-DD date string, or null if invalid/absent.
+ */
+function parseDate(value) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  return value;
+}
+
+/**
  * Sum cost/token fields across an array of totals objects.
  */
 function aggregateTotals(totalsArray) {
@@ -49,9 +57,11 @@ function mergeDailyBreakdowns(breakdowns) {
  * Query: ?days=30
  */
 export async function getGatewayUsage(req, res) {
+  const startDate = parseDate(req.query.startDate);
+  const endDate = parseDate(req.query.endDate);
   const days = parseInt(req.query.days) || 30;
   try {
-    const data = await openclawService.getUsageCost(days);
+    const data = await openclawService.getUsageCost({ days, startDate, endDate });
     return res.json(data);
   } catch (error) {
     logger.error("getGatewayUsage failed", error);
@@ -63,9 +73,11 @@ export async function getGatewayUsage(req, res) {
  * GET /api/usage/agents
  * Per-agent cost summary across all agents.
  * Calls sessions.list → groups by agentId → calls sessions.usage per key → aggregates.
- * Returns sessions from the default date range used by the gateway (last 30 days).
+ * Query: ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD (optional, defaults to gateway's last 30 days)
  */
-export async function getAllAgentsUsage(_req, res) {
+export async function getAllAgentsUsage(req, res) {
+  const startDate = parseDate(req.query.startDate);
+  const endDate = parseDate(req.query.endDate);
   try {
     const sessions = await openclawService.getSessionsList();
 
@@ -83,7 +95,7 @@ export async function getAllAgentsUsage(_req, res) {
       Object.entries(byAgent).map(async ([agentId, keys]) => {
         const usageResults = await Promise.all(
           keys.map((key) =>
-            openclawService.getSessionUsage(key).catch((err) => {
+            openclawService.getSessionUsage(key, { startDate, endDate }).catch((err) => {
               logger.warn("getSessionUsage failed", { key, error: err.message });
               return null;
             })
@@ -117,10 +129,12 @@ export async function getAllAgentsUsage(_req, res) {
 /**
  * GET /api/usage/agents/:agentId
  * Cost summary for a specific agent across all its sessions.
- * Returns sessions from the default date range used by the gateway (last 30 days).
+ * Query: ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD (optional, defaults to gateway's last 30 days)
  */
 export async function getAgentUsage(req, res) {
   const { agentId } = req.params;
+  const startDate = parseDate(req.query.startDate);
+  const endDate = parseDate(req.query.endDate);
   if (!agentId || !/^[A-Za-z0-9_-]+$/.test(agentId)) {
     return res.status(400).json({ error: "Invalid agentId" });
   }
@@ -143,7 +157,7 @@ export async function getAgentUsage(req, res) {
 
     const usageResults = await Promise.all(
       agentSessions.map((s) =>
-        openclawService.getSessionUsage(s.key).catch((err) => {
+        openclawService.getSessionUsage(s.key, { startDate, endDate }).catch((err) => {
           logger.warn("getSessionUsage failed", { key: s.key, error: err.message });
           return null;
         })
