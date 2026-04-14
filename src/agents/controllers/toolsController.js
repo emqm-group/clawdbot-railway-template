@@ -7,51 +7,35 @@ const ORCHESTRATOR_SECRET = () => process.env.ORCHESTRATOR_SECRET?.trim();
 const TENANT_ID = () => process.env.TENANT_ID?.trim();
 
 /**
- * Patch tools.allow for one agent or all agents (when agentId is null).
+ * Patch tools.allow for the specified agent in openclaw.json.
  * Non-fatal — logs errors but does not throw.
  */
 async function applyAgentToolsAllow(action, agentId, tools) {
   const toolNames = tools.map((t) => t.name);
 
-  let agentIds;
-  if (agentId) {
-    agentIds = [agentId];
-  } else {
-    // Global — apply to all agents currently in the config.
-    try {
-      const config = configManager.readConfig();
-      agentIds = (config.agents?.list ?? []).map((a) => a.id);
-    } catch (err) {
-      logger.error("toolsController: failed to read config for global tools.allow patch", { error: err.message });
+  try {
+    const existing = configManager.getAgentConfig(agentId);
+    if (!existing) {
+      logger.warn("toolsController: agent not found in config, skipping tools.allow patch", { agentId });
       return;
     }
-  }
 
-  for (const id of agentIds) {
-    try {
-      const existing = configManager.getAgentConfig(id);
-      if (!existing) {
-        logger.warn("toolsController: agent not found in config, skipping tools.allow patch", { agentId: id });
-        continue;
-      }
+    const currentAllow = existing.tools?.allow ?? [];
 
-      const currentAllow = existing.tools?.allow ?? [];
-
-      let newAllow;
-      if (action === "add") {
-        const toAdd = toolNames.filter((n) => !currentAllow.includes(n));
-        newAllow = [...currentAllow, ...toAdd];
-      } else {
-        const toRemove = new Set(toolNames);
-        newAllow = currentAllow.filter((n) => !toRemove.has(n));
-      }
-
-      const newTools = { ...(existing.tools ?? {}), allow: newAllow };
-      await configManager.patchAgentConfig(id, { tools: newTools });
-      logger.info("toolsController: patched agent tools.allow", { agentId: id, action, toolNames });
-    } catch (err) {
-      logger.error("toolsController: failed to patch agent tools.allow", { agentId: id, error: err.message });
+    let newAllow;
+    if (action === "add") {
+      const toAdd = toolNames.filter((n) => !currentAllow.includes(n));
+      newAllow = [...currentAllow, ...toAdd];
+    } else {
+      const toRemove = new Set(toolNames);
+      newAllow = currentAllow.filter((n) => !toRemove.has(n));
     }
+
+    const newTools = { ...(existing.tools ?? {}), allow: newAllow };
+    await configManager.patchAgentConfig(agentId, { tools: newTools });
+    logger.info("toolsController: patched agent tools.allow", { agentId, action, toolNames });
+  } catch (err) {
+    logger.error("toolsController: failed to patch agent tools.allow", { agentId, error: err.message });
   }
 }
 
@@ -63,6 +47,9 @@ async function applyAgentToolsAllow(action, agentId, tools) {
 export async function register(req, res, restartGateway) {
   const { action, agent_id, tools } = req.body;
 
+  if (!agent_id) {
+    return res.status(400).json({ error: "agent_id is required" });
+  }
   if (!action || !["add", "remove"].includes(action)) {
     return res.status(400).json({ error: 'action must be "add" or "remove"' });
   }
@@ -87,7 +74,7 @@ export async function register(req, res, restartGateway) {
     await restartGateway();
     logger.info("toolsController.register: gateway restarted after tool update", {
       action,
-      agentId: agent_id ?? "global",
+      agentId: agent_id,
       toolCount: tools.length,
     });
   } catch (err) {
@@ -97,7 +84,7 @@ export async function register(req, res, restartGateway) {
 
 /**
  * POST /api/tools/invoke
- * Called by the composio-tools plugin (loopback only — no auth).
+ * Called by the third-party-tools plugin (loopback only — no auth).
  * Proxies the tool call to the orchestrator.
  */
 export async function invoke(req, res) {

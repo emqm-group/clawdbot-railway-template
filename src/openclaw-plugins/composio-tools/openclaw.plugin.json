@@ -1,9 +1,0 @@
-{
-  "id": "composio-tools",
-  "name": "Composio Tools",
-  "description": "Dynamically registers third-party tools from the tools manifest and proxies invocations to the orchestrator via openclaw-wrapper.",
-  "configSchema": {
-    "type": "object",
-    "additionalProperties": false
-  }
-}

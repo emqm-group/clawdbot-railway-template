@@ -911,11 +911,11 @@ async function runAutoSetup() {
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "tools.sessions.visibility", "all"]));
   console.log("[auto-setup] tools.sessions.visibility set to all");
 
-  // Register composio-tools plugin
-  const composioPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "composio-tools");
-  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "install", "--link", composioPluginPath]));
-  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", "composio-tools"]));
-  console.log("[auto-setup] composio-tools plugin registered and enabled");
+  // Register third-party-tools plugin
+  const thirdPartyPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "third-party-tools");
+  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "install", "--link", thirdPartyPluginPath]));
+  await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", "third-party-tools"]));
+  console.log("[auto-setup] third-party-tools plugin registered and enabled");
 
   console.log("[auto-setup] setup complete — starting gateway...");
   try {

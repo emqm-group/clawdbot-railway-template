@@ -38,7 +38,7 @@ export function createToolsRouter(orchestratorSecret, restartGateway) {
     (req, res) => toolsController.register(req, res, restartGateway)
   );
 
-  // POST /api/tools/invoke — composio-tools plugin calls this (loopback only)
+  // POST /api/tools/invoke — third-party-tools plugin calls this (loopback only)
   router.post("/invoke", requireLoopback, toolsController.invoke);
 
   return router;

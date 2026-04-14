@@ -1,0 +1,9 @@
+{
+  "id": "third-party-tools",
+  "name": "Third-Party Tools",
+  "description": "Dynamically registers internal command definitions from the tools manifest and proxies invocations to the orchestrator via openclaw-wrapper.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
