@@ -71,7 +71,8 @@ export default function register(api) {
           ];
           if (directive_filename) {
             const workspace = `/data/.openclaw/workspace-${agentId}`;
-            const skillPath = `${workspace}/skills/${directive_filename}/SKILL.md`;
+            const skillName = directive_filename.replace(/\.md$/i, "");
+            const skillPath = `${workspace}/skills/${skillName}/SKILL.md`;
             lines.push(`Skill file: ${skillPath} — this is a skill file that defines how to execute this task type. Read it and follow its instructions before proceeding.`);
             log("kc_get_next_task", "skill file attached", { agentId, taskId: id, skillPath });
           }

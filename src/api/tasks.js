@@ -12,12 +12,34 @@
 
 import express from "express";
 
+function log(msg, meta) {
+  const metaStr = meta ? " " + JSON.stringify(meta) : "";
+  console.log(`[KC-TASKS] ${msg}${metaStr}`);
+}
+
+function logError(msg, meta) {
+  const metaStr = meta ? " " + JSON.stringify(meta) : "";
+  console.error(`[KC-TASKS] ERROR: ${msg}${metaStr}`);
+}
+
 export function createTasksRouter() {
   const router = express.Router();
 
   const ORCHESTRATOR_URL = () => process.env.ORCHESTRATOR_URL?.trim();
   const ORCHESTRATOR_SECRET = () => process.env.ORCHESTRATOR_SECRET?.trim();
   const TENANT_ID = () => process.env.TENANT_ID?.trim();
+
+  // Log config presence on first use via module-level check
+  {
+    const url = process.env.ORCHESTRATOR_URL?.trim();
+    const secret = process.env.ORCHESTRATOR_SECRET?.trim();
+    const tenantId = process.env.TENANT_ID?.trim();
+    log("tasks router initialised", {
+      ORCHESTRATOR_URL: url ? `${url.slice(0, 40)}${url.length > 40 ? "…" : ""}` : "(missing)",
+      ORCHESTRATOR_SECRET: secret ? "(set)" : "(missing)",
+      TENANT_ID: tenantId || "(missing)",
+    });
+  }
 
   // Loopback-only guard — only the king-cross-tools plugin (running inside the
   // gateway on the same host) should call these endpoints.
@@ -72,6 +94,7 @@ export function createTasksRouter() {
       url = `${url}?${qs.toString()}`;
     }
 
+    log(`${method} ${url}`);
     let resp;
     try {
       resp = await fetch(url, {
@@ -80,8 +103,10 @@ export function createTasksRouter() {
         ...(body !== undefined ? { body } : {}),
       });
     } catch (err) {
+      logError("fetch failed", { method, url, error: err.message, cause: err.cause?.message ?? null });
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
+    log(`${method} ${url} → ${resp.status}`);
 
     // Mirror status and body back to the plugin.
     const contentType = resp.headers.get("content-type") || "";
@@ -147,6 +172,7 @@ export function createTasksRouter() {
     if (agentId) qs.set("agentId", agentId);
     const url = `${baseUrl}/internal/tasks${artifactPath}?${qs.toString()}`;
 
+    log(`DELETE ${url}`);
     let resp;
     try {
       resp = await fetch(url, {
@@ -157,8 +183,10 @@ export function createTasksRouter() {
         },
       });
     } catch (err) {
+      logError("fetch failed", { method: "DELETE", url, error: err.message, cause: err.cause?.message ?? null });
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
+    log(`DELETE ${url} → ${resp.status}`);
 
     const contentType = resp.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
