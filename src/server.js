@@ -734,23 +734,20 @@ function buildOnboardArgs(payload) {
 
     const flag = map[payload.authChoice];
 
-    // If the user picked an API-key auth choice but didn't provide a secret, fail fast.
+    // Effective secret: form field takes priority, fall back to Railway env var.
+    const effectiveSecret = secret || (process.env.OPENCLAW_AUTH_SECRET || "").trim();
+
+    // If the user picked an API-key auth choice but no secret is available, fail fast.
     // Otherwise OpenClaw may fall back to its default auth choice, which looks like the
     // wizard "reverted" their selection.
-    if (flag && !secret && !process.env.OPENCLAW_AUTH_SECRET) {
+    if (flag && !effectiveSecret) {
       throw new Error(
         `Missing auth secret for authChoice=${payload.authChoice}`,
       );
     }
 
     if (flag) {
-      if (process.env.OPENCLAW_AUTH_SECRET) {
-        // OPENCLAW_AUTH_SECRET is set as a Railway env var — store a SecretRef via
-        // --secret-input-mode ref so the plaintext key is never written to openclaw.json.
-        args.push("--secret-input-mode", "ref", flag, "OPENCLAW_AUTH_SECRET");
-      } else {
-        args.push(flag, secret);
-      }
+      args.push(flag, effectiveSecret);
     }
 
     if (payload.authChoice === "token") {
