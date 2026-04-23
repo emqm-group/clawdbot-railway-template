@@ -47,7 +47,9 @@ export default function register(api) {
       try {
         const data = await callWrapper("GET", `/agent/${encodeURIComponent(agentId)}`);
         let text = JSON.stringify(data);
-        if (data.task?.directive_filename) {
+        if (!data.task) {
+          text += "\n\nNo scheduled tasks remaining. Your loop is complete — stop and wait for the next notification.";
+        } else if (data.task.directive_filename) {
           const workspace = `/data/.openclaw/workspace-${agentId}`;
           const skillPath = `${workspace}/skills/${data.task.directive_filename}/SKILL.md`;
           text += `\n\nSkill file for this task: ${skillPath} — this is a skill file that defines how to execute this task type. Read it and follow its instructions before proceeding.`;
