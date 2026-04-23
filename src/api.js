@@ -7,6 +7,7 @@ import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
 import usageRoutes from "./agents/routes/usageRoutes.js";
 import { createToolsRouter } from "./agents/routes/toolsRoutes.js";
+import { createDirectivesRouter } from "./agents/routes/directivesRoutes.js";
 import { createNotificationsRouter } from "./api/notifications.js";
 import { createTasksRouter } from "./api/tasks.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
@@ -30,6 +31,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunn
   app.use("/api/files", authMiddleware(jwtSecret), fileRoutes);
   app.use("/api/usage", authMiddleware(jwtSecret), usageRoutes);
   app.use("/api/tools", createToolsRouter(process.env.ORCHESTRATOR_SECRET?.trim(), restartGateway));
+  app.use("/api/directives", createDirectivesRouter(process.env.ORCHESTRATOR_SECRET?.trim(), restartGateway));
 
   // KC notification receiver — called by orchestrator to push task events to agents.
   // Uses the same JWT auth as all /api/* routes (jwtSecret = openclaw_jwt_secret).
