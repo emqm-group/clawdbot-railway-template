@@ -6,6 +6,16 @@
 const WRAPPER_PORT = process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000";
 const BASE_URL = `http://127.0.0.1:${WRAPPER_PORT}/api/tasks`;
 
+function log(tool, msg, meta) {
+  const metaStr = meta ? " " + JSON.stringify(meta) : "";
+  console.log(`[KC-TOOLS] [${tool}] ${msg}${metaStr}`);
+}
+
+function logError(tool, msg, meta) {
+  const metaStr = meta ? " " + JSON.stringify(meta) : "";
+  console.error(`[KC-TOOLS] [${tool}] ERROR: ${msg}${metaStr}`);
+}
+
 async function callWrapper(method, path, body) {
   const url = `${BASE_URL}${path}`;
   const opts = {
@@ -44,13 +54,16 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { agentId }) {
+      log("kc_get_next_task", "called", { agentId });
       try {
         const data = await callWrapper("GET", `/agent/${encodeURIComponent(agentId)}`);
         let text;
         if (!data.task) {
           text = "No scheduled tasks remaining. Your loop is complete — stop and wait for the next notification.";
+          log("kc_get_next_task", "no tasks in queue", { agentId });
         } else {
           const { id, task_description, task_type_name, directive_filename } = data.task;
+          log("kc_get_next_task", "task found", { agentId, taskId: id, task_type_name, directive_filename: directive_filename ?? null });
           const lines = [
             `Task ID: ${id}`,
             `Task type: ${task_type_name ?? "none"}`,
@@ -60,13 +73,16 @@ export default function register(api) {
             const workspace = `/data/.openclaw/workspace-${agentId}`;
             const skillPath = `${workspace}/skills/${directive_filename}/SKILL.md`;
             lines.push(`Skill file: ${skillPath} — this is a skill file that defines how to execute this task type. Read it and follow its instructions before proceeding.`);
+            log("kc_get_next_task", "skill file attached", { agentId, taskId: id, skillPath });
           }
           text = lines.join("\n");
         }
+        log("kc_get_next_task", "message sent to agent", { agentId, message: text });
         return {
           content: [{ type: "text", text }],
         };
       } catch (err) {
+        logError("kc_get_next_task", err.message, { agentId });
         return {
           content: [{ type: "text", text: `kc_get_next_task failed: ${err.message}` }],
         };
@@ -92,12 +108,15 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { taskId }) {
+      log("kc_get_task", "called", { taskId });
       try {
         const data = await callWrapper("GET", `/${encodeURIComponent(taskId)}`);
+        log("kc_get_task", "success", { taskId, execution_status: data.task?.execution_status, artifactCount: data.task?.artifacts?.length ?? 0 });
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
         };
       } catch (err) {
+        logError("kc_get_task", err.message, { taskId });
         return {
           content: [{ type: "text", text: `kc_get_task failed: ${err.message}` }],
         };
@@ -154,15 +173,18 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { agentId, taskId, execution_status, agent_notes }) {
+      log("kc_update_task", "called", { agentId, taskId, execution_status: execution_status ?? null, has_agent_notes: agent_notes !== undefined });
       try {
         const body = { agentId };
         if (execution_status !== undefined) body.execution_status = execution_status;
         if (agent_notes !== undefined) body.agent_notes = agent_notes;
         const data = await callWrapper("PATCH", `/${encodeURIComponent(taskId)}`, body);
+        log("kc_update_task", "success", { agentId, taskId, execution_status: data.task?.execution_status, approval_status: data.task?.approval_status });
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
         };
       } catch (err) {
+        logError("kc_update_task", err.message, { agentId, taskId, execution_status: execution_status ?? null });
         return {
           content: [{ type: "text", text: `kc_update_task failed: ${err.message}` }],
         };
@@ -209,16 +231,19 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { agentId, assignedToAgentId, taskDescription, additionalInfo, taskTypeId, priority }) {
+      log("kc_create_task", "called", { agentId, assignedToAgentId, taskTypeId: taskTypeId ?? null, priority: priority ?? null });
       try {
         const body = { agentId, assignedToAgentId, taskDescription };
         if (additionalInfo !== undefined) body.additionalInfo = additionalInfo;
         if (taskTypeId !== undefined) body.taskTypeId = taskTypeId;
         if (priority !== undefined) body.priority = priority;
         const data = await callWrapper("POST", "", body);
+        log("kc_create_task", "success", { agentId, assignedToAgentId, taskId: data.task?.id });
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
         };
       } catch (err) {
+        logError("kc_create_task", err.message, { agentId, assignedToAgentId });
         return {
           content: [{ type: "text", text: `kc_create_task failed: ${err.message}` }],
         };
@@ -267,6 +292,7 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { agentId, taskId, artifactType, platform, externalId, metadata }) {
+      log("kc_register_artifact", "called", { agentId, taskId, artifactType, platform, externalId });
       try {
         const body = { agentId, artifactType, platform, externalId };
         if (metadata !== undefined) body.metadata = metadata;
@@ -275,10 +301,12 @@ export default function register(api) {
           `/${encodeURIComponent(taskId)}/artifacts`,
           body
         );
+        log("kc_register_artifact", "success", { agentId, taskId, artifactId: data.artifact?.id });
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
         };
       } catch (err) {
+        logError("kc_register_artifact", err.message, { agentId, taskId, artifactType, platform });
         return {
           content: [{ type: "text", text: `kc_register_artifact failed: ${err.message}` }],
         };
@@ -312,16 +340,19 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { agentId, taskId, artifactId }) {
+      log("kc_delete_artifact", "called", { agentId, taskId, artifactId });
       try {
         const data = await callWrapper(
           "DELETE",
           `/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}`,
           { agentId }
         );
+        log("kc_delete_artifact", "success", { agentId, taskId, artifactId });
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
         };
       } catch (err) {
+        logError("kc_delete_artifact", err.message, { agentId, taskId, artifactId });
         return {
           content: [{ type: "text", text: `kc_delete_artifact failed: ${err.message}` }],
         };
