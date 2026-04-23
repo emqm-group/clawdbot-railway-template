@@ -46,8 +46,14 @@ export default function register(api) {
     async execute(_toolCallId, { agentId }) {
       try {
         const data = await callWrapper("GET", `/agent/${encodeURIComponent(agentId)}`);
+        let text = JSON.stringify(data);
+        if (data.task?.directive_filename) {
+          const workspace = `/data/.openclaw/workspace-${agentId}`;
+          const skillPath = `${workspace}/skills/${data.task.directive_filename}/SKILL.md`;
+          text += `\n\nSkill file for this task: ${skillPath} — this is a skill file that defines how to execute this task type. Read it and follow its instructions before proceeding.`;
+        }
         return {
-          content: [{ type: "text", text: JSON.stringify(data) }],
+          content: [{ type: "text", text }],
         };
       } catch (err) {
         return {
