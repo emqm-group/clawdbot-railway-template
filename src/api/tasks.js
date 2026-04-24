@@ -11,15 +11,24 @@
  */
 
 import express from "express";
+import logger from "../agents/utils/logger.js";
 
 function log(msg, meta) {
-  const metaStr = meta ? " " + JSON.stringify(meta) : "";
-  console.log(`[KC-TASKS] ${msg}${metaStr}`);
+  logger.info(`[KC-TASKS] ${msg}`, meta);
 }
 
 function logError(msg, meta) {
-  const metaStr = meta ? " " + JSON.stringify(meta) : "";
-  console.error(`[KC-TASKS] ERROR: ${msg}${metaStr}`);
+  logger.error(`[KC-TASKS] ${msg}`, meta?.error ?? "", meta);
+}
+
+function previewBody(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  try {
+    const s = JSON.stringify(obj);
+    return s.length > 300 ? `${s.slice(0, 300)}…` : s;
+  } catch {
+    return "[unserializable]";
+  }
 }
 
 export function createTasksRouter() {
@@ -50,6 +59,11 @@ export function createTasksRouter() {
     const isLoopback =
       ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
     if (!isLoopback) {
+      logError("loopback guard rejected request", {
+        method: req.method,
+        path: req.originalUrl,
+        remote: ip,
+      });
       return res.status(403).json({ error: "Forbidden" });
     }
     next();
@@ -69,7 +83,14 @@ export function createTasksRouter() {
   async function forward(req, res, orchestratorPath, overrideBody) {
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
-    if (!baseUrl || !secret) return missingConfig(res);
+    if (!baseUrl || !secret) {
+      logError("missing config on forward", {
+        orchestratorUrlPresent: Boolean(baseUrl),
+        orchestratorSecretPresent: Boolean(secret),
+        path: orchestratorPath,
+      });
+      return missingConfig(res);
+    }
 
     const tenantId = TENANT_ID();
     const method = req.method;
@@ -83,18 +104,24 @@ export function createTasksRouter() {
     };
 
     let body;
+    let mergedBodyForLog = null;
     if (isBodyMethod) {
       // Merge tenantId into the forwarded body. overrideBody lets callers inject
       // extra fields (e.g. agentId for DELETE-with-body which HTTP technically allows).
       const incoming = typeof overrideBody === "object" ? overrideBody : (req.body ?? {});
-      body = JSON.stringify({ tenantId, ...incoming });
+      mergedBodyForLog = { tenantId, ...incoming };
+      body = JSON.stringify(mergedBodyForLog);
     } else {
       // GET / DELETE — pass tenantId as query param
       const qs = new URLSearchParams({ tenantId: tenantId ?? "" });
       url = `${url}?${qs.toString()}`;
     }
 
-    log(`${method} ${url}`);
+    log(`forward → ${method} ${url}`, {
+      tenantIdPresent: Boolean(tenantId),
+      bodyPreview: previewBody(mergedBodyForLog),
+    });
+    const startedAt = Date.now();
     let resp;
     try {
       resp = await fetch(url, {
@@ -103,18 +130,39 @@ export function createTasksRouter() {
         ...(body !== undefined ? { body } : {}),
       });
     } catch (err) {
-      logError("fetch failed", { method, url, error: err.message, cause: err.cause?.message ?? null });
+      logError("forward fetch failed", {
+        method,
+        url,
+        error: err.message,
+        cause: err.cause?.message ?? null,
+      });
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
-    log(`${method} ${url} → ${resp.status}`);
+    log(`forward ← ${method} ${url} → ${resp.status} in ${Date.now() - startedAt}ms`);
 
     // Mirror status and body back to the plugin.
     const contentType = resp.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        logError("forward non-2xx response", {
+          method,
+          url,
+          status: resp.status,
+          bodyPreview: previewBody(data),
+        });
+      }
       return res.status(resp.status).json(data);
     }
     const text = await resp.text().catch(() => "");
+    if (!resp.ok) {
+      logError("forward non-2xx response (text)", {
+        method,
+        url,
+        status: resp.status,
+        bodyPreview: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+      });
+    }
     return res.status(resp.status).type("text/plain").send(text);
   }
 
@@ -162,7 +210,13 @@ export function createTasksRouter() {
     const artifactPath = `/${encodeURIComponent(req.params.taskId)}/artifacts/${encodeURIComponent(req.params.artifactId)}`;
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
-    if (!baseUrl || !secret) return missingConfig(res);
+    if (!baseUrl || !secret) {
+      logError("missing config on DELETE artifact", {
+        orchestratorUrlPresent: Boolean(baseUrl),
+        orchestratorSecretPresent: Boolean(secret),
+      });
+      return missingConfig(res);
+    }
 
     const tenantId = TENANT_ID();
     const agentId = req.body?.agentId;
@@ -172,7 +226,13 @@ export function createTasksRouter() {
     if (agentId) qs.set("agentId", agentId);
     const url = `${baseUrl}/internal/tasks${artifactPath}?${qs.toString()}`;
 
-    log(`DELETE ${url}`);
+    log(`DELETE artifact → ${url}`, {
+      tenantIdPresent: Boolean(tenantId),
+      agentId: agentId ?? null,
+      taskId: req.params.taskId,
+      artifactId: req.params.artifactId,
+    });
+    const startedAt = Date.now();
     let resp;
     try {
       resp = await fetch(url, {
@@ -183,17 +243,35 @@ export function createTasksRouter() {
         },
       });
     } catch (err) {
-      logError("fetch failed", { method: "DELETE", url, error: err.message, cause: err.cause?.message ?? null });
+      logError("DELETE artifact fetch failed", {
+        url,
+        error: err.message,
+        cause: err.cause?.message ?? null,
+      });
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
-    log(`DELETE ${url} → ${resp.status}`);
+    log(`DELETE artifact ← ${url} → ${resp.status} in ${Date.now() - startedAt}ms`);
 
     const contentType = resp.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        logError("DELETE artifact non-2xx", {
+          url,
+          status: resp.status,
+          bodyPreview: previewBody(data),
+        });
+      }
       return res.status(resp.status).json(data);
     }
     const text = await resp.text().catch(() => "");
+    if (!resp.ok) {
+      logError("DELETE artifact non-2xx (text)", {
+        url,
+        status: resp.status,
+        bodyPreview: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+      });
+    }
     return res.status(resp.status).type("text/plain").send(text);
   });
 

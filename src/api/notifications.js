@@ -44,8 +44,12 @@ const coalesceMap = new Map(); // agentId → NodeJS.Timeout
 function markCoalescing(agentId) {
   const existing = coalesceMap.get(agentId);
   if (existing) clearTimeout(existing);
-  const timer = setTimeout(() => coalesceMap.delete(agentId), COALESCE_WINDOW_MS);
+  const timer = setTimeout(() => {
+    coalesceMap.delete(agentId);
+    logger.info(`[KC-NOTIF] coalesce window expired`, { agentId });
+  }, COALESCE_WINDOW_MS);
   coalesceMap.set(agentId, timer);
+  logger.info(`[KC-NOTIF] coalesce window opened (${COALESCE_WINDOW_MS}ms)`, { agentId });
 }
 
 function isCoalescing(agentId) {
@@ -69,15 +73,27 @@ function enqueue(event) {
   const q = getOrCreateQueue(event.agentId);
 
   if (event.event === "tasks_available" || event.event === "task_assigned") {
+    const replaced = q.wakeup != null;
     // Collapse: wake-up slot holds at most one entry.
     q.wakeup = event;
+    logger.info(`[KC-NOTIF] enqueued wake-up${replaced ? " (replaced existing)" : ""}`, {
+      agentId: event.agentId,
+      event: event.event,
+      approvalsPending: q.approvals.length,
+    });
   } else if (event.event === "approval_actioned") {
     if (q.approvals.length >= 50) {
       logger.warn(
-        `[notifications] approval queue soft limit (50) reached for agent ${event.agentId}; enqueueing anyway`
+        `[KC-NOTIF] approval queue soft limit (50) reached for agent ${event.agentId}; enqueueing anyway`
       );
     }
     q.approvals.push(event);
+    logger.info(`[KC-NOTIF] enqueued approval_actioned`, {
+      agentId: event.agentId,
+      taskId: event.taskId,
+      approvalsPending: q.approvals.length,
+      wakeupPending: q.wakeup != null,
+    });
   }
 }
 
@@ -104,7 +120,17 @@ function buildMessage(event) {
 async function triggerAgent(agentId, message) {
   const gatewayToken = GATEWAY_TOKEN();
   const url = `http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions`;
+  const model = `openclaw:${agentId}`;
 
+  const messagePreview = message.length > 120 ? `${message.slice(0, 120)}…` : message;
+  logger.info(`[KC-NOTIF] triggerAgent → POST ${url}`, {
+    agentId,
+    model,
+    tokenPresent: Boolean(gatewayToken),
+    messagePreview,
+  });
+
+  const startedAt = Date.now();
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -112,9 +138,15 @@ async function triggerAgent(agentId, message) {
       Authorization: `Bearer ${gatewayToken}`,
     },
     body: JSON.stringify({
-      model: `openclaw:${agentId}`,
+      model,
       messages: [{ role: "user", content: message }],
     }),
+  });
+
+  logger.info(`[KC-NOTIF] triggerAgent ← ${resp.status} in ${Date.now() - startedAt}ms`, {
+    agentId,
+    model,
+    ok: resp.ok,
   });
 
   return resp;
@@ -132,7 +164,11 @@ async function isUnavailable(resp) {
       resp.status === 503 ||
       resp.status === 409
     );
-  } catch {
+  } catch (err) {
+    logger.warn(`[KC-NOTIF] isUnavailable: failed to read response body — treating as not-UNAVAILABLE`, {
+      status: resp.status,
+      error: err?.message ?? String(err),
+    });
     return false;
   }
 }
@@ -146,17 +182,21 @@ const APPROVAL_RETRY_DELAYS = [30_000, 60_000, 120_000];
 function scheduleApprovalRetry(agentId, message, attempt = 0) {
   if (attempt >= APPROVAL_RETRY_DELAYS.length) {
     logger.error(
-      `[notifications] approval_actioned exhausted all retries for agent ${agentId} — manual recovery needed`
+      `[KC-NOTIF] approval_actioned exhausted all retries for agent ${agentId} — manual recovery needed`
     );
     return;
   }
 
   const delay = APPROVAL_RETRY_DELAYS[attempt];
   logger.warn(
-    `[notifications] approval_actioned UNAVAILABLE for agent ${agentId}; retry ${attempt + 1}/${APPROVAL_RETRY_DELAYS.length} in ${delay / 1000}s`
+    `[KC-NOTIF] approval_actioned UNAVAILABLE for agent ${agentId}; retry ${attempt + 1}/${APPROVAL_RETRY_DELAYS.length} in ${delay / 1000}s`
   );
 
   setTimeout(async () => {
+    logger.info(`[KC-NOTIF] approval_actioned retry firing`, {
+      agentId,
+      attempt: attempt + 1,
+    });
     try {
       const resp = await triggerAgent(agentId, message);
       if (await isUnavailable(resp)) {
@@ -164,12 +204,17 @@ function scheduleApprovalRetry(agentId, message, attempt = 0) {
       } else if (!resp.ok) {
         const text = await resp.text().catch(() => "");
         logger.error(
-          `[notifications] approval_actioned delivery failed for agent ${agentId} [${resp.status}]: ${text}`
+          `[KC-NOTIF] approval_actioned delivery failed for agent ${agentId} [${resp.status}]: ${text}`
         );
+      } else {
+        logger.info(`[KC-NOTIF] approval_actioned delivered on retry`, {
+          agentId,
+          attempt: attempt + 1,
+        });
       }
     } catch (err) {
       logger.error(
-        `[notifications] approval_actioned retry error for agent ${agentId}: ${err.message}`
+        `[KC-NOTIF] approval_actioned retry error for agent ${agentId}: ${err.message}`
       );
       scheduleApprovalRetry(agentId, message, attempt + 1);
     }
@@ -184,12 +229,14 @@ async function dispatchApprovalActioned(agentId, message) {
     } else if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       logger.error(
-        `[notifications] approval_actioned delivery failed for agent ${agentId} [${resp.status}]: ${text}`
+        `[KC-NOTIF] approval_actioned delivery failed for agent ${agentId} [${resp.status}]: ${text}`
       );
+    } else {
+      logger.info(`[KC-NOTIF] approval_actioned delivered`, { agentId });
     }
   } catch (err) {
     logger.error(
-      `[notifications] approval_actioned trigger error for agent ${agentId}: ${err.message}`
+      `[KC-NOTIF] approval_actioned trigger error for agent ${agentId}: ${err.message}`
     );
     // On network error, start retry schedule.
     scheduleApprovalRetry(agentId, message, 0);
@@ -207,12 +254,14 @@ async function dispatchWakeup(agentId, message) {
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       logger.warn(
-        `[notifications] wake-up trigger failed for agent ${agentId} [${resp.status}]: ${text}`
+        `[KC-NOTIF] wake-up trigger failed for agent ${agentId} [${resp.status}]: ${text}`
       );
+    } else {
+      logger.info(`[KC-NOTIF] wake-up delivered`, { agentId });
     }
   } catch (err) {
     logger.warn(
-      `[notifications] wake-up trigger error for agent ${agentId}: ${err.message}`
+      `[KC-NOTIF] wake-up trigger error for agent ${agentId}: ${err.message}`
     );
   }
 }
@@ -222,6 +271,9 @@ async function dispatchWakeup(agentId, message) {
 // approval_actioned entries fire first (in order), then the wake-up slot.
 // ---------------------------------------------------------------------------
 async function drainAllQueues() {
+  const agentCount = pendingQueues.size;
+  logger.info(`[KC-NOTIF] draining pending queues`, { agents: agentCount });
+
   for (const [agentId, q] of pendingQueues.entries()) {
     // Snapshot + clear before dispatching to avoid double-dispatch if a new
     // notification arrives mid-drain.
@@ -233,6 +285,11 @@ async function drainAllQueues() {
       pendingQueues.delete(agentId);
       continue;
     }
+
+    logger.info(`[KC-NOTIF] draining agent ${agentId}`, {
+      approvals: approvals.length,
+      wakeup: wakeup != null,
+    });
 
     // Approvals first.
     for (const ev of approvals) {
@@ -248,6 +305,8 @@ async function drainAllQueues() {
 
     pendingQueues.delete(agentId);
   }
+
+  logger.info(`[KC-NOTIF] drain complete`);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,9 +314,16 @@ async function drainAllQueues() {
 // ---------------------------------------------------------------------------
 async function handleEvent(event, ensureGatewayRunning) {
   const { agentId } = event;
+  logger.info(`[KC-NOTIF] handleEvent start`, {
+    event: event.event,
+    agentId,
+    taskId: event.taskId ?? null,
+    action: event.action ?? null,
+  });
+
   const message = buildMessage(event);
   if (!message) {
-    logger.warn(`[notifications] unknown event type: ${event.event}`);
+    logger.warn(`[KC-NOTIF] unknown event type: ${event.event}`, { agentId });
     return;
   }
 
@@ -265,17 +331,26 @@ async function handleEvent(event, ensureGatewayRunning) {
   // ensureGatewayRunning() returns { ok: false } (no throw) when not configured,
   // and throws when the gateway fails to start. Both cases mean not ready.
   let gatewayReady = false;
+  let gatewayErr = null;
   try {
     const result = await ensureGatewayRunning();
     gatewayReady = result?.ok === true;
-  } catch {
+    if (!gatewayReady) gatewayErr = result?.reason ?? "unknown";
+  } catch (err) {
     gatewayReady = false;
+    gatewayErr = err?.message ?? String(err);
   }
+  logger.info(`[KC-NOTIF] gateway readiness check`, {
+    agentId,
+    gatewayReady,
+    reason: gatewayErr,
+  });
 
   if (!gatewayReady) {
     enqueue(event);
-    logger.info(
-      `[notifications] gateway not ready — queued ${event.event} for agent ${agentId}`
+    logger.warn(
+      `[KC-NOTIF] gateway not ready — queued ${event.event} for agent ${agentId}`,
+      { reason: gatewayErr }
     );
     return;
   }
@@ -289,17 +364,21 @@ async function handleEvent(event, ensureGatewayRunning) {
   // Now process the current event.
   if (event.event === "approval_actioned") {
     // Never coalesced.
+    logger.info(`[KC-NOTIF] dispatching approval_actioned`, { agentId, taskId: event.taskId });
     await dispatchApprovalActioned(agentId, message);
   } else {
     // tasks_available or task_assigned — apply coalescing.
     if (isCoalescing(agentId)) {
       logger.info(
-        `[notifications] coalescing ${event.event} for agent ${agentId} (already in-flight)`
+        `[KC-NOTIF] coalescing ${event.event} for agent ${agentId} (already in-flight, within ${COALESCE_WINDOW_MS}ms window)`
       );
       return;
     }
+    logger.info(`[KC-NOTIF] dispatching wake-up`, { agentId, event: event.event });
     await dispatchWakeup(agentId, message);
   }
+
+  logger.info(`[KC-NOTIF] handleEvent end`, { agentId, event: event.event });
 }
 
 // ---------------------------------------------------------------------------
@@ -311,17 +390,29 @@ async function handleEvent(event, ensureGatewayRunning) {
 export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
   const router = express.Router();
 
+  logger.info(`[KC-NOTIF] notifications router initialised`, {
+    jwtSecretPresent: Boolean(jwtSecret),
+  });
+
   // Auth: JWT signed by the orchestrator with openclaw_jwt_secret (= JWT_SECRET).
   function requireJwt(req, res, next) {
     const header = req.headers.authorization || "";
     if (!header.startsWith("Bearer ")) {
+      logger.warn(`[KC-NOTIF] JWT check failed: missing/invalid Authorization header`, {
+        hasHeader: Boolean(header),
+        remote: req.socket?.remoteAddress,
+      });
       return res.status(401).json({ error: "Missing or invalid Authorization header" });
     }
     const token = header.slice(7);
     try {
       req.jwtPayload = jwt.verify(token, jwtSecret);
       next();
-    } catch {
+    } catch (err) {
+      logger.warn(`[KC-NOTIF] JWT verify failed`, {
+        error: err?.message ?? String(err),
+        remote: req.socket?.remoteAddress,
+      });
       return res.status(401).json({ error: "Invalid or expired token" });
     }
   }
@@ -336,23 +427,37 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
    *
    * Responds immediately (202) — agent triggering is async.
    */
-  router.post("/tasks", requireJwt, async (req, res) => {
+  router.post("/tasks", (req, res, next) => {
+    logger.info(`[KC-NOTIF] POST /api/notifications/tasks received`, {
+      remote: req.socket?.remoteAddress,
+      bodyKeys: Object.keys(req.body ?? {}),
+      event: req.body?.event,
+      agentId: req.body?.agentId,
+      taskId: req.body?.taskId,
+      action: req.body?.action,
+    });
+    next();
+  }, requireJwt, async (req, res) => {
     const { event, agentId, taskId, action, userNotes } = req.body ?? {};
 
     if (!event || !agentId) {
+      logger.warn(`[KC-NOTIF] validation failed: missing event or agentId`, { event, agentId });
       return res.status(400).json({ error: "event and agentId are required" });
     }
 
     const VALID_EVENTS = new Set(["tasks_available", "task_assigned", "approval_actioned"]);
     if (!VALID_EVENTS.has(event)) {
+      logger.warn(`[KC-NOTIF] validation failed: unknown event type`, { event, agentId });
       return res.status(400).json({ error: `Unknown event type: ${event}` });
     }
 
     if (event === "approval_actioned") {
       if (!taskId || !action) {
+        logger.warn(`[KC-NOTIF] validation failed: approval_actioned missing taskId/action`, { agentId, taskId, action });
         return res.status(400).json({ error: "approval_actioned requires taskId and action" });
       }
       if (action !== "approve" && action !== "modify") {
+        logger.warn(`[KC-NOTIF] validation failed: approval_actioned bad action`, { agentId, action });
         return res
           .status(400)
           .json({ error: "approval_actioned action must be approve or modify" });
@@ -360,16 +465,18 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
     }
 
     if (event === "task_assigned" && !taskId) {
+      logger.warn(`[KC-NOTIF] validation failed: task_assigned missing taskId`, { agentId });
       return res.status(400).json({ error: "task_assigned requires taskId" });
     }
 
     // Respond immediately — agent triggering is async.
     res.status(202).json({ ok: true });
+    logger.info(`[KC-NOTIF] accepted (202) — handing to handleEvent`, { event, agentId, taskId });
 
     // Process without blocking the response.
     const normalizedEvent = { event, agentId, taskId, action, userNotes: userNotes ?? null };
     handleEvent(normalizedEvent, ensureGatewayRunning).catch((err) => {
-      logger.error(`[notifications] unhandled error in handleEvent: ${err.message}`);
+      logger.error(`[KC-NOTIF] unhandled error in handleEvent: ${err.message}`, err);
     });
   });
 
