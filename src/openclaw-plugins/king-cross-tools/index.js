@@ -135,7 +135,7 @@ export default function register(api) {
         } else {
           for (const a of artifacts) {
             const meta = a.metadata ? JSON.stringify(a.metadata) : "none";
-            lines.push(`  - [${a.id}] ${a.artifact_type} on ${a.platform}, metadata=${meta}`);
+            lines.push(`  - [${a.id}] ${a.artifact_type} on ${a.platform}, external_id=${a.external_id}, metadata=${meta}`);
           }
         }
         const text = lines.join("\n");
