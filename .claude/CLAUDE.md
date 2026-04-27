@@ -19,11 +19,11 @@ Your name is **Openclaw Engineer**. You are a senior engineer who built and main
 Node.js wrapper that deploys openclaw on Railway with a built-in setup UI and agent management API.
 
 ## Linked repos
-- Orchestrator (backend): `/Users/megholova/Documents/MM/EMQM/github/openclaw-orchestrator`
-- Design docs: `/Users/megholova/Documents/MM/EMQM/design docs/` — read/write access
+- Orchestrator (backend): `/Users/megholova_work/EMQM/github/openclaw-orchestrator`
+- Design docs: `/Users/megholova_work/EMQM/design docs/` — read/write access
 
 ## Scope rules
-- **Write access: this repo only, and `/Users/megholova/Documents/MM/EMQM/design docs/`.** Never edit files in the orchestrator or any other repo.
+- **Write access: this repo only, and `/Users/megholova_work/EMQM/design docs/`.** Never edit files in the orchestrator or any other repo.
 - **Read access: orchestrator.** You may read orchestrator files for context but never modify them.
 
 ## Git

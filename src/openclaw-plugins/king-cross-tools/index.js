@@ -112,10 +112,35 @@ export default function register(api) {
       log("kc_get_task", "called", { taskId });
       try {
         const data = await callWrapper("GET", `/${encodeURIComponent(taskId)}`);
-        log("kc_get_task", "success", { taskId, execution_status: data.task?.execution_status, artifactCount: data.task?.artifacts?.length ?? 0 });
-        return {
-          content: [{ type: "text", text: JSON.stringify(data) }],
-        };
+        const task = data.task;
+        if (!task) {
+          logError("kc_get_task", "no task in response", { taskId });
+          return { content: [{ type: "text", text: `kc_get_task failed: no task returned for taskId=${taskId}` }] };
+        }
+        const artifacts = task.artifacts ?? [];
+        log("kc_get_task", "success", { taskId, execution_status: task.execution_status, artifactCount: artifacts.length });
+
+        const lines = [
+          `Task: ${task.id}`,
+          `Description: ${task.task_description}`,
+          `Execution status: ${task.execution_status}`,
+          `Approval status: ${task.approval_status}`,
+          `User notes: ${task.user_notes ?? "none"}`,
+          `Agent notes (your last snapshot): ${task.agent_notes ?? "none"}`,
+          ``,
+          `Artifacts (${artifacts.length}):`,
+        ];
+        if (artifacts.length === 0) {
+          lines.push(`  none`);
+        } else {
+          for (const a of artifacts) {
+            const meta = a.metadata ? JSON.stringify(a.metadata) : "none";
+            lines.push(`  - [${a.id}] ${a.artifact_type} on ${a.platform}, metadata=${meta}`);
+          }
+        }
+        const text = lines.join("\n");
+        log("kc_get_task", "message sent to agent", { taskId, message: text });
+        return { content: [{ type: "text", text }] };
       } catch (err) {
         logError("kc_get_task", err.message, { taskId });
         return {

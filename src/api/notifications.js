@@ -107,10 +107,9 @@ function buildMessage(event) {
     return "You have a task scheduled. Invoke kc_get_next_task to fetch it and begin.";
   }
   if (event.event === "approval_actioned") {
-    const { taskId, action, userNotes } = event;
+    const { taskId } = event;
     return (
-      `Approval actioned for task ${taskId}. action=${action}. ` +
-      `userNotes=${userNotes ?? "null"}. ` +
+      `Approval actioned for task ${taskId}. ` +
       `Invoke kc_get_task with taskId=${taskId} to fetch current state and resume.`
     );
   }
@@ -328,7 +327,6 @@ async function handleEvent(event, ensureGatewayRunning) {
     event: event.event,
     agentId,
     taskId: event.taskId ?? null,
-    action: event.action ?? null,
   });
 
   const message = buildMessage(event);
@@ -430,10 +428,10 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
   /**
    * POST /api/notifications/tasks
    *
-   * Body shapes:
+   * Body shapes (pure wake-ups — agent fetches task state via kc_get_task):
    *   { event: "tasks_available",   agentId }
    *   { event: "task_assigned",     agentId, taskId }
-   *   { event: "approval_actioned", agentId, taskId, action, userNotes }
+   *   { event: "approval_actioned", agentId, taskId }
    *
    * Responds immediately (202) — agent triggering is async.
    */
@@ -444,11 +442,10 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
       event: req.body?.event,
       agentId: req.body?.agentId,
       taskId: req.body?.taskId,
-      action: req.body?.action,
     });
     next();
   }, requireJwt, async (req, res) => {
-    const { event, agentId, taskId, action, userNotes } = req.body ?? {};
+    const { event, agentId, taskId } = req.body ?? {};
 
     if (!event || !agentId) {
       logger.warn(`[KC-NOTIF] validation failed: missing event or agentId`, { event, agentId });
@@ -461,17 +458,9 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
       return res.status(400).json({ error: `Unknown event type: ${event}` });
     }
 
-    if (event === "approval_actioned") {
-      if (!taskId || !action) {
-        logger.warn(`[KC-NOTIF] validation failed: approval_actioned missing taskId/action`, { agentId, taskId, action });
-        return res.status(400).json({ error: "approval_actioned requires taskId and action" });
-      }
-      if (action !== "approve" && action !== "modify") {
-        logger.warn(`[KC-NOTIF] validation failed: approval_actioned bad action`, { agentId, action });
-        return res
-          .status(400)
-          .json({ error: "approval_actioned action must be approve or modify" });
-      }
+    if (event === "approval_actioned" && !taskId) {
+      logger.warn(`[KC-NOTIF] validation failed: approval_actioned missing taskId`, { agentId });
+      return res.status(400).json({ error: "approval_actioned requires taskId" });
     }
 
     if (event === "task_assigned" && !taskId) {
@@ -484,7 +473,7 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
     logger.info(`[KC-NOTIF] accepted (202) — handing to handleEvent`, { event, agentId, taskId });
 
     // Process without blocking the response.
-    const normalizedEvent = { event, agentId, taskId, action, userNotes: userNotes ?? null };
+    const normalizedEvent = { event, agentId, taskId };
     handleEvent(normalizedEvent, ensureGatewayRunning).catch((err) => {
       logger.error(`[KC-NOTIF] unhandled error in handleEvent: ${err.message}`, err);
     });
