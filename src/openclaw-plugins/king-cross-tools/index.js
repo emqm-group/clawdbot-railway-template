@@ -118,18 +118,26 @@ export default function register(api) {
           return { content: [{ type: "text", text: `kc_get_task failed: no task returned for taskId=${taskId}` }] };
         }
         const artifacts = task.artifacts ?? [];
-        log("kc_get_task", "success", { taskId, execution_status: task.execution_status, artifactCount: artifacts.length });
+        const { directive_filename, task_type_name, assigned_to_agent_id } = task;
+        log("kc_get_task", "success", { taskId, execution_status: task.execution_status, artifactCount: artifacts.length, task_type_name: task_type_name ?? null, directive_filename: directive_filename ?? null });
 
         const lines = [
           `Task: ${task.id}`,
+          `Task type: ${task_type_name ?? "none"}`,
           `Description: ${task.task_description}`,
           `Execution status: ${task.execution_status}`,
           `Approval status: ${task.approval_status}`,
           `User notes: ${task.user_notes ?? "none"}`,
           `Agent notes (your last snapshot): ${task.agent_notes ?? "none"}`,
-          ``,
-          `Artifacts (${artifacts.length}):`,
         ];
+        if (directive_filename && assigned_to_agent_id) {
+          const workspace = `/data/.openclaw/workspace-${assigned_to_agent_id}`;
+          const skillName = directive_filename.replace(/\.md$/i, "");
+          const skillPath = `${workspace}/skills/${skillName}/SKILL.md`;
+          lines.push(`Skill file: ${skillPath} — this is a skill file that defines how to execute this task type. Read it and follow its instructions before proceeding.`);
+          log("kc_get_task", "skill file attached", { taskId, assignedToAgentId: assigned_to_agent_id, skillPath });
+        }
+        lines.push(``, `Artifacts (${artifacts.length}):`);
         if (artifacts.length === 0) {
           lines.push(`  none`);
         } else {
