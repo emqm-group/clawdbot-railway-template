@@ -231,10 +231,10 @@ export default function register(api) {
   api.registerTool({
     name: "kc_create_task",
     description:
-      "Create a new task assigned to another agent. Use this to delegate work at runtime. agentId is your own agent ID (creator); assignedToAgentId is the target agent. priority defaults to end-of-queue if omitted.",
+      "Create a new task assigned to another agent. Use this to delegate work at runtime. agentId is your own agent ID (creator); assignedToAgentId is the target agent; directiveFilename names the skill file in the target agent's workspace that defines how to execute the task. priority defaults to end-of-queue if omitted.",
     parameters: {
       type: "object",
-      required: ["agentId", "assignedToAgentId", "taskDescription"],
+      required: ["agentId", "assignedToAgentId", "taskDescription", "directiveFilename"],
       additionalProperties: false,
       properties: {
         agentId: {
@@ -248,6 +248,11 @@ export default function register(api) {
         taskDescription: {
           type: "string",
           description: "What the assigned agent should do.",
+        },
+        directiveFilename: {
+          type: "string",
+          description:
+            "Filename of the directive/skill that defines how the assigned agent should execute this task (e.g. 'draft-email.md'). The assigned agent will be pointed to its workspace skills directory using this filename.",
         },
         additionalInfo: {
           type: "string",
@@ -264,10 +269,10 @@ export default function register(api) {
         },
       },
     },
-    async execute(_toolCallId, { agentId, assignedToAgentId, taskDescription, additionalInfo, taskTypeId, priority }) {
-      log("kc_create_task", "called", { agentId, assignedToAgentId, taskTypeId: taskTypeId ?? null, priority: priority ?? null });
+    async execute(_toolCallId, { agentId, assignedToAgentId, taskDescription, directiveFilename, additionalInfo, taskTypeId, priority }) {
+      log("kc_create_task", "called", { agentId, assignedToAgentId, directiveFilename, taskTypeId: taskTypeId ?? null, priority: priority ?? null });
       try {
-        const body = { agentId, assignedToAgentId, taskDescription };
+        const body = { agentId, assignedToAgentId, taskDescription, directiveFilename };
         if (additionalInfo !== undefined) body.additionalInfo = additionalInfo;
         if (taskTypeId !== undefined) body.taskTypeId = taskTypeId;
         if (priority !== undefined) body.priority = priority;
