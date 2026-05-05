@@ -212,10 +212,10 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "kc_create_task",
     description:
-      "Create a new task assigned to another agent. Use this to delegate work at runtime. assignedToAgentId is the target agent; directiveFilename names the skill file in the target agent's workspace that defines how to execute the task. priority defaults to end-of-queue if omitted.",
+      "Create a new task assigned to another agent. Use this to delegate work at runtime. assignedToAgentId is the target agent; taskTypeName names the task type (the orchestrator selects the directive/skill from the task type + assigned agent + approval mode). priority defaults to end-of-queue if omitted.",
     parameters: {
       type: "object",
-      required: ["assignedToAgentId", "taskDescription", "directiveFilename"],
+      required: ["assignedToAgentId", "taskDescription", "taskTypeName"],
       additionalProperties: false,
       properties: {
         assignedToAgentId: {
@@ -226,18 +226,10 @@ export default function register(api) {
           type: "string",
           description: "What the assigned agent should do.",
         },
-        directiveFilename: {
+        taskTypeName: {
           type: "string",
           description:
-            "Filename of the directive/skill that defines how the assigned agent should execute this task (e.g. 'draft-email.md'). The assigned agent will be pointed to its workspace skills directory using this filename.",
-        },
-        additionalInfo: {
-          type: "string",
-          description: "Optional additional context for the assigned agent.",
-        },
-        taskTypeId: {
-          type: "string",
-          description: "UUID of the task type. Drives approval logic when provided.",
+            "Name of the task type. The orchestrator uses this (plus the assigned agent and approval mode) to resolve the directive/skill that tells the assigned agent how to execute the task.",
         },
         priority: {
           type: "integer",
@@ -246,13 +238,11 @@ export default function register(api) {
         },
       },
     },
-    async execute(_toolCallId, { assignedToAgentId, taskDescription, directiveFilename, additionalInfo, taskTypeId, priority }) {
+    async execute(_toolCallId, { assignedToAgentId, taskDescription, taskTypeName, priority }) {
       const agentId = ctx.agentId;
-      log("kc_create_task", "called", { agentId, assignedToAgentId, directiveFilename, taskTypeId: taskTypeId ?? null, priority: priority ?? null });
+      log("kc_create_task", "called", { agentId, assignedToAgentId, taskTypeName, priority: priority ?? null });
       try {
-        const body = { agentId, assignedToAgentId, taskDescription, directiveFilename };
-        if (additionalInfo !== undefined) body.additionalInfo = additionalInfo;
-        if (taskTypeId !== undefined) body.taskTypeId = taskTypeId;
+        const body = { agentId, assignedToAgentId, taskDescription, taskTypeName };
         if (priority !== undefined) body.priority = priority;
         const data = await callWrapper("POST", "", body);
         const projected = { id: data.task?.id };
