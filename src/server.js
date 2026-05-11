@@ -12,8 +12,15 @@ import * as tar from "tar";
 
 // API route setup
 import setupApiRoutes from "./api.js";
+import { createInternalRouter } from "./api/internal.js";
+import {
+  loadFromOrchestrator as loadTenantMappings,
+  isConfigured as tenantMappingsConfigured,
+} from "./agents/utils/tenantMappings.js";
 import logger from "./agents/utils/logger.js";
 import configManager from "./agents/utils/configManager.js";
+
+const internalRouter = createInternalRouter();
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -763,24 +770,44 @@ function buildOnboardArgs(payload) {
 async function notifyOrchestrator(status, reason) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
   const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
-  const tenantId = process.env.TENANT_ID?.trim();
+  const shardId = process.env.SHARD_ID?.trim();
 
-  if (!orchestratorUrl || !orchestratorSecret || !tenantId) {
-    console.warn("[auto-setup] skipping orchestrator callback — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or TENANT_ID not set");
+  if (!orchestratorUrl || !orchestratorSecret || !shardId) {
+    console.warn("[auto-setup] skipping orchestrator callback — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or SHARD_ID not set");
     return;
   }
 
+  // Per Decision #6 step 7, the provision callback body includes the
+  // wrapper-injected `plugins` block from openclaw.json so the orchestrator
+  // can persist it into shard_openclaw_configs.content and round-trip it
+  // byte-for-byte through every subsequent config write (validator rule #4).
+  let plugins = null;
+  if (status === "ready") {
+    try {
+      const cfg = configManager.readConfig();
+      plugins = cfg?.plugins ?? null;
+    } catch (err) {
+      console.warn(`[auto-setup] failed to read plugins block from openclaw.json: ${String(err)}`);
+    }
+  }
+
+  const url = `${orchestratorUrl}/internal/shards/${encodeURIComponent(shardId)}/provision-callback`;
   try {
-    const res = await fetch(`${orchestratorUrl}/internal/provision/callback`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${orchestratorSecret}`,
       },
-      body: JSON.stringify({ tenantId, status, ...(reason && { reason }) }),
+      body: JSON.stringify({
+        shardId,
+        status,
+        ...(reason && { reason }),
+        ...(plugins !== null && { plugins }),
+      }),
     });
     if (res.ok) {
-      console.log(`[auto-setup] orchestrator notified: ${status}`);
+      console.log(`[auto-setup] orchestrator notified: ${status} (shard ${shardId})`);
     } else {
       console.warn(`[auto-setup] orchestrator callback returned ${res.status}`);
     }
@@ -931,6 +958,11 @@ async function runAutoSetup() {
   await configManager.ensureKingsCrossToolsPlugin(kingsCrossPluginPath);
   await configManager.ensureKingsCrossToolsAlsoAllow();
   console.log("[auto-setup] king-cross-tools plugin config written");
+
+  // Cross-tenant fs guard — non-negotiable on shared shards (Wrapper Impl #6).
+  const fsTenantGuardPath = path.join(APP_ROOT, "src", "openclaw-plugins", "fs-tenant-guard");
+  await configManager.ensureFsTenantGuardPlugin(fsTenantGuardPath);
+  console.log("[auto-setup] fs-tenant-guard plugin config written");
 
   console.log("[auto-setup] setup complete — starting gateway...");
   try {
@@ -1830,10 +1862,15 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
   }
 });
 
+// --- Internal /internal/* routes (orchestrator → wrapper, ORCHESTRATOR_SECRET Bearer) ---
+// Must be registered BEFORE the gateway proxy below so /internal/* never reaches the gateway.
+app.use("/internal", internalRouter);
+
 // --- Agent Management API Routes (MUST come before any catch-all middleware) ---
-// Completely isolated from gateway proxy - registered at app root
-const JWT_SECRET = process.env.JWT_SECRET || "abcd1234";
-setupApiRoutes(app, JWT_SECRET, restartGateway, ensureGatewayRunning);
+// Completely isolated from gateway proxy - registered at app root.
+// All inbound /api/* routes verify the single per-shard OPENCLAW_GATEWAY_TOKEN
+// (Decision #8 / Wrapper Impl #2).
+setupApiRoutes(app, OPENCLAW_GATEWAY_TOKEN, restartGateway, ensureGatewayRunning);
 
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
@@ -2063,6 +2100,34 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     } catch (err) {
       console.warn(`[wrapper] failed to write king-cross-tools plugin config: ${err.message}`);
     }
+
+    // Cross-tenant fs guard — required on every shared shard (Wrapper Impl #6).
+    const fsTenantGuardPath = path.join(APP_ROOT, "src", "openclaw-plugins", "fs-tenant-guard");
+    try {
+      await configManager.ensureFsTenantGuardPlugin(fsTenantGuardPath);
+      console.log("[wrapper] fs-tenant-guard plugin config ensured");
+    } catch (err) {
+      console.warn(`[wrapper] failed to write fs-tenant-guard plugin config: ${err.message}`);
+    }
+  }
+
+  // Boot-time fetch of tenant→agent mappings (Wrapper Impl #1). Best-effort:
+  // if the orchestrator is unreachable at boot, the cache stays empty and the
+  // first cache miss triggers a single-flight re-fetch. Skipped when SHARD_ID
+  // or ORCHESTRATOR_* env vars are not all set (e.g. local dev).
+  if (tenantMappingsConfigured()) {
+    try {
+      const n = await loadTenantMappings();
+      console.log(`[wrapper] tenant-mapping cache primed (${n} agents)`);
+    } catch (err) {
+      console.warn(
+        `[wrapper] tenant-mapping cache boot fetch failed (cache empty, will re-fetch on first miss): ${err.message}`
+      );
+    }
+  } else {
+    console.log(
+      "[wrapper] tenant-mapping cache not configured (SHARD_ID / ORCHESTRATOR_URL / ORCHESTRATOR_SECRET missing) — skipping boot fetch"
+    );
   }
 
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)

@@ -84,7 +84,10 @@ export default function register(api) {
 
   // kc_get_task — fetch a single task with its active artifacts.
   // Used on resumption after an approval_actioned notification to reconstruct full context.
-  api.registerTool({
+  //
+  // Factory form so ctx.agentId is available — the wrapper needs the calling
+  // agent's id (query param) to look up the tenant via its in-memory mapping cache.
+  api.registerTool((ctx) => ({
     name: "kc_get_task",
     description:
       "Fetch a single task by ID, including its active (non-deleted) artifacts. Use this after receiving an approval_actioned notification to load task state and artifacts before executing Phase 2.",
@@ -100,9 +103,11 @@ export default function register(api) {
       },
     },
     async execute(_toolCallId, { taskId }) {
-      log("kc_get_task", "called", { taskId });
+      const agentId = ctx.agentId;
+      log("kc_get_task", "called", { agentId, taskId });
       try {
-        const data = await callWrapper("GET", `/${encodeURIComponent(taskId)}`);
+        const qs = agentId ? `?agentId=${encodeURIComponent(agentId)}` : "";
+        const data = await callWrapper("GET", `/${encodeURIComponent(taskId)}${qs}`);
         const t = data.task;
         if (!t) {
           logError("kc_get_task", "no task in response", { taskId });
@@ -138,7 +143,7 @@ export default function register(api) {
         return errorResult(err.message);
       }
     },
-  });
+  }));
 
   // kc_update_task — update execution_status and/or agent_notes on a task.
   // Only the assigned agent may call this. Ownership is validated server-side.

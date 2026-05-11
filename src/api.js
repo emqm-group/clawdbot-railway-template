@@ -1,7 +1,9 @@
 /**
  * API Routes - Completely isolated from gateway proxy
- * JWT-authenticated REST API for agent management
- * This file handles ONLY /api/* routes and never touches the gateway
+ *
+ * All inbound /api/* routes authenticate against a single per-shard Bearer:
+ * OPENCLAW_GATEWAY_TOKEN (Decision #8 / Wrapper Impl #2). Loopback-only
+ * endpoints (/api/tools/invoke, /api/tasks/*) keep their existing IP guards.
  */
 import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
@@ -14,7 +16,7 @@ import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 import openclawService from "./agents/utils/openclawService.js";
 
-export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunning) {
+export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayRunning) {
   // --- Agent Management API Routes ---
   // These are COMPLETELY ISOLATED and do NOT pass through gateway proxy
   // Registered FIRST before any catch-all middleware
@@ -27,18 +29,18 @@ export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunn
     next();
   });
 
-  app.use("/api/agents", authMiddleware(jwtSecret), agentRoutes);
-  app.use("/api/files", authMiddleware(jwtSecret), fileRoutes);
-  app.use("/api/usage", authMiddleware(jwtSecret), usageRoutes);
-  app.use("/api/tools", createToolsRouter(process.env.ORCHESTRATOR_SECRET?.trim(), restartGateway));
-  app.use("/api/directives", createDirectivesRouter(process.env.ORCHESTRATOR_SECRET?.trim(), restartGateway));
+  app.use("/api/agents", authMiddleware(gatewayToken), agentRoutes);
+  app.use("/api/files", authMiddleware(gatewayToken), fileRoutes);
+  app.use("/api/usage", authMiddleware(gatewayToken), usageRoutes);
+  app.use("/api/tools", createToolsRouter(gatewayToken, restartGateway));
+  app.use("/api/directives", createDirectivesRouter(gatewayToken, restartGateway));
 
-  // KC notification receiver — called by orchestrator to push task events to agents.
-  // Uses the same JWT auth as all /api/* routes (jwtSecret = openclaw_jwt_secret).
-  app.use("/api/notifications", createNotificationsRouter(jwtSecret, ensureGatewayRunning));
+  // KC notification receiver — called by orchestrator to push task events.
+  app.use("/api/notifications", createNotificationsRouter(gatewayToken, ensureGatewayRunning));
 
-  // KC task proxy — loopback-only, called by king-cross-tools plugin inside gateway.
-  // Injects tenantId + ORCHESTRATOR_SECRET and forwards to /internal/tasks/*.
+  // KC task proxy — loopback-only, called by king-cross-tools plugin inside
+  // gateway. Looks up tenantId via the tenant-mapping cache (Wrapper Impl #3)
+  // and forwards to /internal/tasks/* with the agentId carried in the body.
   app.use("/api/tasks", createTasksRouter());
 
   /**
@@ -46,7 +48,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunn
    * Approve a device pairing request.
    * Body: { requestId: string }
    */
-  app.post("/api/devices/approve", authMiddleware(jwtSecret), async (req, res) => {
+  app.post("/api/devices/approve", authMiddleware(gatewayToken), async (req, res) => {
     const requestId = String(req.body?.requestId || "").trim();
     if (!requestId) {
       return res.status(400).json({ error: "requestId is required" });
@@ -68,7 +70,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunn
    * Runtime toggle — does not modify openclaw.json.
    * Body: { action: "enable" | "disable" }
    */
-  app.post("/api/system/heartbeat", authMiddleware(jwtSecret), async (req, res) => {
+  app.post("/api/system/heartbeat", authMiddleware(gatewayToken), async (req, res) => {
     const action = String(req.body?.action || "").trim();
     if (action !== "enable" && action !== "disable") {
       return res.status(400).json({ error: 'action must be "enable" or "disable"' });
@@ -85,7 +87,7 @@ export function setupApiRoutes(app, jwtSecret, restartGateway, ensureGatewayRunn
    * POST /api/gateway/restart
    * Restart the openclaw gateway. Required after gateway.bind or gateway.port changes.
    */
-  app.post("/api/gateway/restart", authMiddleware(jwtSecret), async (_req, res) => {
+  app.post("/api/gateway/restart", authMiddleware(gatewayToken), async (_req, res) => {
     try {
       logger.info("POST /api/gateway/restart");
       await restartGateway();
