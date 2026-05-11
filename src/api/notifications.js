@@ -28,7 +28,7 @@
  */
 
 import express from "express";
-import jwt from "jsonwebtoken";
+import crypto from "node:crypto";
 import logger from "../agents/utils/logger.js";
 
 const GATEWAY_PORT = 18789;
@@ -391,38 +391,47 @@ async function handleEvent(event, ensureGatewayRunning) {
 
 // ---------------------------------------------------------------------------
 // Router factory.
-// jwtSecret: same JWT_SECRET used by all /api/* routes — the orchestrator signs
-// notifications with openclaw_jwt_secret which equals JWT_SECRET on this tenant.
+// gatewayToken: OPENCLAW_GATEWAY_TOKEN — the single per-shard Bearer the
+// orchestrator uses for every inbound /api/* call (Wrapper Impl #2).
 // ensureGatewayRunning: from server.js — starts the gateway if not running.
 // ---------------------------------------------------------------------------
-export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
+export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
   const router = express.Router();
 
   logger.info(`[KC-NOTIF] notifications router initialised`, {
-    jwtSecretPresent: Boolean(jwtSecret),
+    gatewayTokenPresent: Boolean(gatewayToken),
   });
 
-  // Auth: JWT signed by the orchestrator with openclaw_jwt_secret (= JWT_SECRET).
-  function requireJwt(req, res, next) {
+  function timingSafeStringEqual(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  }
+
+  // Auth: per-shard OPENCLAW_GATEWAY_TOKEN. The orchestrator sets the same
+  // value as the Railway env var on this shard's service.
+  function requireGatewayToken(req, res, next) {
+    if (!gatewayToken) {
+      return res.status(503).json({ error: "OPENCLAW_GATEWAY_TOKEN not configured" });
+    }
     const header = req.headers.authorization || "";
     if (!header.startsWith("Bearer ")) {
-      logger.warn(`[KC-NOTIF] JWT check failed: missing/invalid Authorization header`, {
+      logger.warn(`[KC-NOTIF] auth check failed: missing/invalid Authorization header`, {
         hasHeader: Boolean(header),
         remote: req.socket?.remoteAddress,
       });
       return res.status(401).json({ error: "Missing or invalid Authorization header" });
     }
     const token = header.slice(7);
-    try {
-      req.jwtPayload = jwt.verify(token, jwtSecret);
-      next();
-    } catch (err) {
-      logger.warn(`[KC-NOTIF] JWT verify failed`, {
-        error: err?.message ?? String(err),
+    if (!timingSafeStringEqual(token, gatewayToken)) {
+      logger.warn(`[KC-NOTIF] auth check failed: token mismatch`, {
         remote: req.socket?.remoteAddress,
       });
-      return res.status(401).json({ error: "Invalid or expired token" });
+      return res.status(401).json({ error: "Invalid token" });
     }
+    next();
   }
 
   /**
@@ -444,7 +453,7 @@ export function createNotificationsRouter(jwtSecret, ensureGatewayRunning) {
       taskId: req.body?.taskId,
     });
     next();
-  }, requireJwt, async (req, res) => {
+  }, requireGatewayToken, async (req, res) => {
     const { event, agentId, taskId } = req.body ?? {};
 
     if (!event || !agentId) {

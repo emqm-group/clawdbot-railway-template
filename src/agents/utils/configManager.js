@@ -373,6 +373,66 @@ class ConfigManager {
   }
 
   /**
+   * Write the fs-tenant-guard plugin config block into openclaw.json.
+   * Same shape as ensureThirdPartyToolsPlugin / ensureKingsCrossToolsPlugin.
+   * This plugin registers only a before_tool_call hook — it does not register
+   * any tools, so there is no tools.alsoAllow entry to maintain.
+   * Serialised via mutex to prevent concurrent read-modify-write races.
+   * @param {string} pluginPath - Absolute path to the plugin directory
+   */
+  ensureFsTenantGuardPlugin(pluginPath) {
+    return this._mutex.acquire(() => {
+      const config = this.readConfig();
+
+      const pluginsSection = config.plugins ?? {};
+
+      const currentAllow = pluginsSection.allow ?? [];
+      const allow = currentAllow.includes("fs-tenant-guard")
+        ? currentAllow
+        : [...currentAllow, "fs-tenant-guard"];
+
+      const currentPaths = pluginsSection.load?.paths ?? [];
+      const paths = currentPaths.includes(pluginPath)
+        ? currentPaths
+        : [...currentPaths, pluginPath];
+
+      const entries = {
+        ...(pluginsSection.entries ?? {}),
+        "fs-tenant-guard": {
+          ...(pluginsSection.entries?.["fs-tenant-guard"] ?? {}),
+          enabled: true,
+        },
+      };
+
+      const existingInstall = pluginsSection.installs?.["fs-tenant-guard"] ?? {};
+      const installs = {
+        ...(pluginsSection.installs ?? {}),
+        "fs-tenant-guard": {
+          source: "path",
+          sourcePath: pluginPath,
+          installPath: pluginPath,
+          version: "1.0.0",
+          installedAt: existingInstall.installedAt ?? new Date().toISOString(),
+        },
+      };
+
+      const updated = {
+        ...config,
+        plugins: {
+          ...pluginsSection,
+          allow,
+          load: { ...(pluginsSection.load ?? {}), paths },
+          entries,
+          installs,
+        },
+      };
+
+      this.writeConfig(updated);
+      logger.info("ConfigManager: ensured fs-tenant-guard plugin config", { pluginPath });
+    });
+  }
+
+  /**
    * Add the KC tool names to the global tools.alsoAllow list so agents can invoke them.
    * Idempotent — skips names already present.
    * Serialised via mutex to prevent concurrent read-modify-write races.

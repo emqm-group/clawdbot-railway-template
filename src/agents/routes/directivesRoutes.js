@@ -1,23 +1,15 @@
 import express from "express";
 import * as directivesController from "../controllers/directivesController.js";
+import { authMiddleware } from "../middleware/auth.js";
 
 /**
- * @param {string} orchestratorSecret - shared secret for inbound orchestrator calls
+ * @param {string|Function} gatewayToken - OPENCLAW_GATEWAY_TOKEN, or a getter for late binding
  * @param {Function} restartGateway - from server.js
  */
-export function createDirectivesRouter(orchestratorSecret, restartGateway) {
+export function createDirectivesRouter(gatewayToken, restartGateway) {
   const router = express.Router();
 
-  function requireOrchestratorSecret(req, res, next) {
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (!orchestratorSecret || token !== orchestratorSecret) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
-  }
-
-  router.use(requireOrchestratorSecret);
+  router.use(authMiddleware(gatewayToken));
 
   router.get("/:agentId", (req, res) => directivesController.list(req, res));
   router.post("/:agentId", (req, res) => directivesController.create(req, res, restartGateway));

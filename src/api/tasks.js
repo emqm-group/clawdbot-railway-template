@@ -2,16 +2,20 @@
  * Task proxy router — /api/tasks/*
  *
  * Loopback-only endpoints called by the king-cross-tools plugin running inside
- * the openclaw gateway subprocess (same container). Each handler injects
- * tenantId (from TENANT_ID env) and ORCHESTRATOR_SECRET, then forwards the
- * request to the orchestrator's /internal/tasks/* routes.
+ * the openclaw gateway subprocess (same container). Each handler resolves
+ * tenantId from the tenant-mapping cache via the caller's agentId
+ * (Wrapper Impl #3 — Decision #8), authenticates outbound with
+ * ORCHESTRATOR_SECRET, and forwards to the orchestrator's /internal/tasks/*
+ * routes. The agentId travels in the request body for POST/PATCH and as a
+ * query parameter for GET/DELETE.
  *
- * No JWT auth: these endpoints are only reachable from 127.0.0.1 (same host).
- * The requireLoopback guard enforces this at the TCP level using req.socket.remoteAddress.
+ * No JWT/Bearer auth: only reachable from 127.0.0.1 (same host); the
+ * requireLoopback guard enforces this via req.socket.remoteAddress.
  */
 
 import express from "express";
 import logger from "../agents/utils/logger.js";
+import { getTenantId } from "../agents/utils/tenantMappings.js";
 
 function log(msg, meta) {
   logger.info(`[KC-TASKS] ${msg}`, meta);
@@ -31,22 +35,34 @@ function previewBody(obj) {
   }
 }
 
+// Resolve the calling agent's id from whichever field carries it on this call.
+// POST/PATCH carry it in the body; GET/DELETE carry it as a query param.
+function extractAgentId(req) {
+  if (req.body && typeof req.body.agentId === "string" && req.body.agentId) {
+    return req.body.agentId;
+  }
+  if (typeof req.query.agentId === "string" && req.query.agentId) {
+    return req.query.agentId;
+  }
+  // GET /api/tasks/agent/:agentId — agentId is in the URL path.
+  if (typeof req.params.agentId === "string" && req.params.agentId) {
+    return req.params.agentId;
+  }
+  return null;
+}
+
 export function createTasksRouter() {
   const router = express.Router();
 
   const ORCHESTRATOR_URL = () => process.env.ORCHESTRATOR_URL?.trim();
   const ORCHESTRATOR_SECRET = () => process.env.ORCHESTRATOR_SECRET?.trim();
-  const TENANT_ID = () => process.env.TENANT_ID?.trim();
 
-  // Log config presence on first use via module-level check
   {
     const url = process.env.ORCHESTRATOR_URL?.trim();
     const secret = process.env.ORCHESTRATOR_SECRET?.trim();
-    const tenantId = process.env.TENANT_ID?.trim();
     log("tasks router initialised", {
       ORCHESTRATOR_URL: url ? `${url.slice(0, 40)}${url.length > 40 ? "…" : ""}` : "(missing)",
       ORCHESTRATOR_SECRET: secret ? "(set)" : "(missing)",
-      TENANT_ID: tenantId || "(missing)",
     });
   }
 
@@ -78,8 +94,9 @@ export function createTasksRouter() {
   }
 
   // Forward a request to the orchestrator's /internal/tasks/* path.
-  // For GET/DELETE: tenantId goes as a query param.
-  // For POST/PATCH with a body: tenantId is merged into the JSON body.
+  // For GET/DELETE: tenantId + agentId go as query params.
+  // For POST/PATCH/PUT with a body: tenantId is merged into the JSON body
+  //   (agentId already arrives in the body from the plugin).
   async function forward(req, res, orchestratorPath, overrideBody) {
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
@@ -92,7 +109,27 @@ export function createTasksRouter() {
       return missingConfig(res);
     }
 
-    const tenantId = TENANT_ID();
+    const agentId = extractAgentId(req);
+    if (!agentId) {
+      logError("forward: agentId missing from request", {
+        method: req.method,
+        path: req.originalUrl,
+      });
+      return res.status(400).json({ error: "agentId is required (body or query)" });
+    }
+
+    let tenantId;
+    try {
+      tenantId = await getTenantId(agentId);
+    } catch (err) {
+      logError("forward: tenant lookup failed", { agentId, error: err.message });
+      return res.status(502).json({ code: "tenant_lookup_failed", message: err.message });
+    }
+    if (!tenantId) {
+      logError("forward: unknown agentId after cache refetch", { agentId });
+      return res.status(404).json({ code: "unknown_agent", message: `Unknown agent: ${agentId}` });
+    }
+
     const method = req.method;
     const isBodyMethod = method === "POST" || method === "PATCH" || method === "PUT";
 
@@ -106,19 +143,17 @@ export function createTasksRouter() {
     let body;
     let mergedBodyForLog = null;
     if (isBodyMethod) {
-      // Merge tenantId into the forwarded body. overrideBody lets callers inject
-      // extra fields (e.g. agentId for DELETE-with-body which HTTP technically allows).
       const incoming = typeof overrideBody === "object" ? overrideBody : (req.body ?? {});
-      mergedBodyForLog = { tenantId, ...incoming };
+      mergedBodyForLog = { tenantId, agentId, ...incoming };
       body = JSON.stringify(mergedBodyForLog);
     } else {
-      // GET / DELETE — pass tenantId as query param
-      const qs = new URLSearchParams({ tenantId: tenantId ?? "" });
+      const qs = new URLSearchParams({ tenantId, agentId });
       url = `${url}?${qs.toString()}`;
     }
 
     log(`forward → ${method} ${url}`, {
-      tenantIdPresent: Boolean(tenantId),
+      tenantId,
+      agentId,
       bodyPreview: previewBody(mergedBodyForLog),
     });
     const startedAt = Date.now();
@@ -140,7 +175,6 @@ export function createTasksRouter() {
     }
     log(`forward ← ${method} ${url} → ${resp.status} in ${Date.now() - startedAt}ms`);
 
-    // Mirror status and body back to the plugin.
     const contentType = resp.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       const data = await resp.json().catch(() => ({}));
@@ -167,45 +201,38 @@ export function createTasksRouter() {
   }
 
   // GET /api/tasks/agent/:agentId
-  // → GET /internal/tasks/agent/:agentId?tenantId=...
-  // Returns: one task (top scheduled by priority ASC, created_at ASC) or empty.
+  // → GET /internal/tasks/agent/:agentId?tenantId=...&agentId=...
   router.get("/agent/:agentId", (req, res) => {
     return forward(req, res, `/agent/${encodeURIComponent(req.params.agentId)}`);
   });
 
   // GET /api/tasks/:taskId
-  // → GET /internal/tasks/:taskId?tenantId=...
-  // Returns: task + active artifacts (for resumption after approval_actioned).
+  // → GET /internal/tasks/:taskId?tenantId=...&agentId=...
+  // Caller (king-cross-tools plugin) MUST pass agentId as a query parameter so
+  // the wrapper can resolve tenantId from the cache.
   router.get("/:taskId", (req, res) => {
     return forward(req, res, `/${encodeURIComponent(req.params.taskId)}`);
   });
 
   // PATCH /api/tasks/:taskId
-  // → PATCH /internal/tasks/:taskId  (body: { tenantId, agentId, execution_status?, agent_notes? })
-  // Agent updates execution_status and/or agent_notes. KC validates ownership.
   router.patch("/:taskId", (req, res) => {
     return forward(req, res, `/${encodeURIComponent(req.params.taskId)}`);
   });
 
   // POST /api/tasks
-  // → POST /internal/tasks  (body: { tenantId, agentId, assignedToAgentId, taskDescription, ... })
-  // Agent creates a task for another agent (runtime delegation).
   router.post("/", (req, res) => {
     return forward(req, res, "");
   });
 
   // POST /api/tasks/:taskId/artifacts
-  // → POST /internal/tasks/:taskId/artifacts  (body: { tenantId, agentId, artifactType, ... })
-  // Agent registers an external artifact before transitioning to awaiting_approval.
   router.post("/:taskId/artifacts", (req, res) => {
     return forward(req, res, `/${encodeURIComponent(req.params.taskId)}/artifacts`);
   });
 
   // DELETE /api/tasks/:taskId/artifacts/:artifactId
-  // → DELETE /internal/tasks/:taskId/artifacts/:artifactId?tenantId=...
-  // Agent soft-deletes a superseded artifact after a modify action.
-  // agentId is included in the request body by the plugin for the orchestrator's
-  // ownership check; we pass it as a query param since HTTP DELETE typically has no body.
+  // The plugin sends agentId in the request body for the orchestrator's
+  // ownership check; we read it from body (or query) and pass both tenantId
+  // and agentId as query params since DELETE typically has no forwarded body.
   router.delete("/:taskId/artifacts/:artifactId", async (req, res) => {
     const artifactPath = `/${encodeURIComponent(req.params.taskId)}/artifacts/${encodeURIComponent(req.params.artifactId)}`;
     const baseUrl = ORCHESTRATOR_URL();
@@ -218,17 +245,27 @@ export function createTasksRouter() {
       return missingConfig(res);
     }
 
-    const tenantId = TENANT_ID();
-    const agentId = req.body?.agentId;
+    const agentId = extractAgentId(req);
+    if (!agentId) {
+      return res.status(400).json({ error: "agentId is required (body or query)" });
+    }
 
-    // Pass tenantId + agentId as query params since DELETE has no body.
-    const qs = new URLSearchParams({ tenantId: tenantId ?? "" });
-    if (agentId) qs.set("agentId", agentId);
+    let tenantId;
+    try {
+      tenantId = await getTenantId(agentId);
+    } catch (err) {
+      return res.status(502).json({ code: "tenant_lookup_failed", message: err.message });
+    }
+    if (!tenantId) {
+      return res.status(404).json({ code: "unknown_agent", message: `Unknown agent: ${agentId}` });
+    }
+
+    const qs = new URLSearchParams({ tenantId, agentId });
     const url = `${baseUrl}/internal/tasks${artifactPath}?${qs.toString()}`;
 
     log(`DELETE artifact → ${url}`, {
-      tenantIdPresent: Boolean(tenantId),
-      agentId: agentId ?? null,
+      tenantId,
+      agentId,
       taskId: req.params.taskId,
       artifactId: req.params.artifactId,
     });

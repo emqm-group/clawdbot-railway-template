@@ -1,10 +1,10 @@
 import logger from "../utils/logger.js";
 import { applyToolsUpdate } from "../utils/toolsManifest.js";
 import configManager from "../utils/configManager.js";
+import { getTenantId } from "../utils/tenantMappings.js";
 
 const ORCHESTRATOR_URL = () => process.env.ORCHESTRATOR_URL?.trim();
 const ORCHESTRATOR_SECRET = () => process.env.ORCHESTRATOR_SECRET?.trim();
-const TENANT_ID = () => process.env.TENANT_ID?.trim();
 
 /**
  * Patch tools.allow for the specified agent in openclaw.json.
@@ -42,7 +42,7 @@ async function applyAgentToolsAllow(action, agentId, tools) {
 /**
  * POST /api/tools/register
  * Called by orchestrator to push tool definitions to this instance.
- * Auth: ORCHESTRATOR_SECRET bearer token.
+ * Auth: OPENCLAW_GATEWAY_TOKEN Bearer (enforced by router).
  *
  * Body: { action, agent_id, tools, restart? }
  *   - restart (default true): when false, applies the writes but skips the trailing
@@ -111,7 +111,9 @@ export async function register(req, res, restartGateway) {
 /**
  * POST /api/tools/invoke
  * Called by the third-party-tools plugin (loopback only — no auth).
- * Proxies the tool call to the orchestrator.
+ * Resolves the calling agent's tenant from the tenant-mapping cache and
+ * forwards to the orchestrator's /internal/tools/:tenantId/invoke endpoint
+ * with the agentId carried in the body (Wrapper Impl #3).
  */
 export async function invoke(req, res) {
   const { agent_id, tool, params } = req.body;
@@ -122,16 +124,31 @@ export async function invoke(req, res) {
 
   const orchestratorUrl = ORCHESTRATOR_URL();
   const secret = ORCHESTRATOR_SECRET();
-  const tenantId = TENANT_ID();
 
-  if (!orchestratorUrl || !secret || !tenantId) {
-    logger.error("toolsController.invoke: missing ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or TENANT_ID");
+  if (!orchestratorUrl || !secret) {
+    logger.error("toolsController.invoke: missing ORCHESTRATOR_URL or ORCHESTRATOR_SECRET");
     return res.status(503).json({ error: "UPSTREAM_ERROR", message: "Orchestrator not configured" });
+  }
+
+  // Resolve tenantId from the tenant-mapping cache. Single-flight re-fetch on
+  // miss; if still missing after re-fetch, the agent is unknown to this shard
+  // (e.g. tenant just removed mid-call). Return the structured `unknown_agent`
+  // code per Decision #8.
+  let tenantId;
+  try {
+    tenantId = await getTenantId(agent_id);
+  } catch (err) {
+    logger.error("toolsController.invoke: tenant lookup failed", { agentId: agent_id, error: err.message });
+    return res.status(502).json({ code: "tenant_lookup_failed", message: err.message });
+  }
+  if (!tenantId) {
+    logger.warn("toolsController.invoke: unknown agentId after cache refetch", { agentId: agent_id });
+    return res.status(404).json({ code: "unknown_agent", message: `Unknown agent: ${agent_id}` });
   }
 
   try {
     const response = await fetch(
-      `${orchestratorUrl}/internal/tools/${tenantId}/invoke`,
+      `${orchestratorUrl}/internal/tools/${encodeURIComponent(tenantId)}/invoke`,
       {
         method: "POST",
         headers: {
