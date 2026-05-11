@@ -27,7 +27,6 @@ const internalRouter = createInternalRouter();
 for (const suffix of [
   "PUBLIC_PORT",
   "STATE_DIR",
-  "WORKSPACE_DIR",
   "GATEWAY_TOKEN",
   "CONFIG_PATH",
 ]) {
@@ -55,15 +54,17 @@ const PORT = Number.parseInt(
   10,
 );
 
-// State/workspace
-// OpenClaw defaults to ~/.openclaw.
+// State directory. OpenClaw defaults to ~/.openclaw; on Railway this is
+// /data/.openclaw per railway.toml. There is no separate workspace-dir env
+// var — openclaw v2026.3.8 doesn't consume one, and every agent's workspace
+// path is set explicitly in agents.list[i].workspace by the orchestrator.
+// WORKSPACE_DIR is kept as a derived local constant for the wrapper's own
+// uses (openclaw default workspace root, bootstrap.sh lookup, backup/import).
 const STATE_DIR =
   process.env.OPENCLAW_STATE_DIR?.trim() ||
   path.join(os.homedir(), ".openclaw");
 
-const WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
-  path.join(STATE_DIR, "workspace");
+const WORKSPACE_DIR = path.join(STATE_DIR, "workspace");
 
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
@@ -227,7 +228,6 @@ async function startGateway() {
     env: {
       ...process.env,
       OPENCLAW_STATE_DIR: STATE_DIR,
-      OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
     },
   });
 
@@ -986,7 +986,6 @@ function runCmd(cmd, args, opts = {}) {
       env: {
         ...process.env,
         OPENCLAW_STATE_DIR: STATE_DIR,
-        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
       },
     });
 
@@ -1798,15 +1797,12 @@ async function readBodyBuffer(req, maxBytes) {
 app.post("/setup/import", requireSetupAuth, async (req, res) => {
   try {
     const dataRoot = "/data";
-    if (
-      !isUnderDir(STATE_DIR, dataRoot) ||
-      !isUnderDir(WORKSPACE_DIR, dataRoot)
-    ) {
+    if (!isUnderDir(STATE_DIR, dataRoot)) {
       return res
         .status(400)
         .type("text/plain")
         .send(
-          "Import is only supported when OPENCLAW_STATE_DIR and OPENCLAW_WORKSPACE_DIR are under /data (Railway volume).\n",
+          "Import is only supported when OPENCLAW_STATE_DIR is under /data (Railway volume).\n",
         );
     }
 
@@ -2030,7 +2026,6 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
         env: {
           ...process.env,
           OPENCLAW_STATE_DIR: STATE_DIR,
-          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
         },
         timeoutMs: 10 * 60 * 1000,
       });

@@ -14,4 +14,3 @@ requiredMountPath = "/data"
 # Do not set PORT here; Railway templates may not apply it reliably and hardcoding
 # can cause domain routing mismatches.
 OPENCLAW_STATE_DIR = "/data/.openclaw"
-OPENCLAW_WORKSPACE_DIR = "/data/workspace"
