@@ -82,23 +82,23 @@ export function createInternalRouter() {
 
   // POST /internal/cleanup-agents
   // Body: { agentIds: string[] }
-  // Recursively deletes /data/workspace/<agentId>/ and
-  // /data/.openclaw/agents/<agentId>/ for each id. Continues on per-agent
-  // failures; never aborts the batch. Response: { ok: string[], failed: [...] }.
+  // For each id, deletes the wrapper-convention per-agent workspace
+  // (${OPENCLAW_STATE_DIR}/workspace-<agentId>/) and the openclaw per-agent
+  // state dir (${OPENCLAW_STATE_DIR}/agents/<agentId>/). These match the paths
+  // configManager.updateAgentInConfig writes when the wrapper creates an agent
+  // and the per-agent state dir openclaw maintains internally.
+  // Continues on per-agent failures; never aborts the batch.
+  // Response: { ok: string[], failed: [{ agentId, error }] }.
   router.post("/cleanup-agents", async (req, res) => {
     const agentIds = req.body?.agentIds;
     if (!Array.isArray(agentIds) || agentIds.length === 0) {
       return res.status(400).json({ error: "agentIds must be a non-empty array" });
     }
 
-    const workspaceRoot =
-      process.env.OPENCLAW_WORKSPACE_DIR?.trim() || "/data/workspace";
-    const stateAgentsRoot = path.join(
-      process.env.OPENCLAW_STATE_DIR?.trim() || "/data/.openclaw",
-      "agents"
+    const stateDirAbs = path.resolve(
+      process.env.OPENCLAW_STATE_DIR?.trim() || "/data/.openclaw"
     );
-    const workspaceRootAbs = path.resolve(workspaceRoot);
-    const stateAgentsRootAbs = path.resolve(stateAgentsRoot);
+    const stateAgentsRootAbs = path.join(stateDirAbs, "agents");
 
     const ok = [];
     const failed = [];
@@ -116,23 +116,20 @@ export function createInternalRouter() {
         continue;
       }
 
-      const targets = [
-        path.join(workspaceRootAbs, agentId),
-        path.join(stateAgentsRootAbs, agentId),
-      ];
+      const workspacePath = path.join(stateDirAbs, `workspace-${agentId}`);
+      const stateAgentPath = path.join(stateAgentsRootAbs, agentId);
 
-      // Belt-and-braces: the resolved targets must live under their respective roots.
-      const targetsOk = targets.every((t, idx) => {
-        const root = idx === 0 ? workspaceRootAbs : stateAgentsRootAbs;
-        return t === root + path.sep + agentId || t.startsWith(root + path.sep);
-      });
-      if (!targetsOk) {
+      // Belt-and-braces: the resolved targets must sit under the state-dir root.
+      if (
+        !workspacePath.startsWith(stateDirAbs + path.sep) ||
+        !stateAgentPath.startsWith(stateAgentsRootAbs + path.sep)
+      ) {
         failed.push({ agentId, error: "resolved path escapes cleanup root" });
         continue;
       }
 
       const errors = [];
-      for (const target of targets) {
+      for (const target of [workspacePath, stateAgentPath]) {
         try {
           await fs.rm(target, { recursive: true, force: true });
         } catch (err) {

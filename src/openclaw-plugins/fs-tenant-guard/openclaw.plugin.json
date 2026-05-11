@@ -1,7 +1,7 @@
 {
   "id": "fs-tenant-guard",
   "name": "Filesystem Tenant Guard",
-  "description": "Subscribes to the before_tool_call hook for the group:fs built-ins (read/write/edit/apply_patch) and blocks any path that resolves outside the calling agent's workspace at /data/workspace/<agentId>/. This is the only enforced cross-tenant filesystem boundary on shared shards (no Docker sandbox). Fails closed when the calling agent's id is unavailable.",
+  "description": "Subscribes to the before_tool_call hook for the group:fs built-ins (read/write/edit/apply_patch) and blocks any path that resolves outside the calling agent's workspace at ${OPENCLAW_STATE_DIR}/workspace-<agentId>/ (default /data/.openclaw/workspace-<agentId>/). This is the only enforced cross-tenant filesystem boundary on shared shards (no Docker sandbox). Fails closed when the calling agent's id is unavailable.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false

@@ -3,16 +3,24 @@
 // On a shared shard, the openclaw process hosts agents owned by multiple
 // tenants on one /data volume. openclaw's built-in fs tools (group:fs at
 // v2026.3.8 — read/write/edit/apply_patch) have no built-in tenant boundary;
-// without this guard, agent A could read('/data/workspace/<agent-B>/secret').
+// without this guard, agent A could read another agent's workspace files.
 //
 // This plugin subscribes to the gateway's before_tool_call hook (signature
 // verified at openclaw v2026.3.8 — src/plugins/types.ts:833-836). For every
 // group:fs invocation it:
 //   - Extracts the target path(s) from the params.
 //   - Resolves to an absolute path (symlinks resolved when the target exists).
-//   - Asserts the resolved path is inside /data/workspace/<ctx.agentId>/.
+//   - Asserts the resolved path is inside the calling agent's workspace dir.
 //   - Returns { block: true, blockReason } on mismatch — openclaw aborts the
 //     tool execution before any I/O and surfaces a structured error to the agent.
+//
+// Workspace path convention. The wrapper places each agent's workspace at
+// ${OPENCLAW_STATE_DIR}/workspace-<agentId>/ (default
+// /data/.openclaw/workspace-<agentId>/). This matches the path written by
+// configManager.updateAgentInConfig and referenced by agentController,
+// openclawService, directivesController, and king-cross-tools (skill_path).
+// The guard must agree with whatever the wrapper actually puts in
+// agents.list[].workspace, because openclaw uses that as the agent's cwd.
 //
 // Fail-closed: when ctx.agentId is undefined (the un-wrapped fallback path
 // through pi-tool-definition-adapter.ts), the call MUST be blocked. An
@@ -31,15 +39,16 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const WORKSPACE_ROOT_DEFAULT = "/data/workspace";
+const STATE_DIR_DEFAULT = "/data/.openclaw";
 const FS_TOOLS = new Set(["read", "write", "edit", "apply_patch"]);
 
-function workspaceRoot() {
-  return process.env.OPENCLAW_WORKSPACE_DIR?.trim() || WORKSPACE_ROOT_DEFAULT;
+function stateDir() {
+  return process.env.OPENCLAW_STATE_DIR?.trim() || STATE_DIR_DEFAULT;
 }
 
 function agentWorkspaceDir(agentId) {
-  return path.resolve(path.join(workspaceRoot(), agentId));
+  // Wrapper convention: ${STATE_DIR}/workspace-<agentId>/.
+  return path.resolve(path.join(stateDir(), `workspace-${agentId}`));
 }
 
 function isInside(absolutePath, agentDir) {
