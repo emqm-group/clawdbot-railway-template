@@ -4,6 +4,34 @@ import os from "os";
 import logger from "./logger.js";
 
 /**
+ * Reject any config that enables tools.elevated globally or on a per-agent entry.
+ * Throws a structured { statusCode: 400, message } that propagates to HTTP callers.
+ */
+function assertNoElevatedTools(config) {
+  if (config?.tools?.elevated?.enabled === true) {
+    logger.warn("configManager: rejected write — global tools.elevated.enabled=true");
+    throw {
+      statusCode: 400,
+      message:
+        "Refused: tools.elevated.enabled=true is not permitted at the global level on a shared shard",
+    };
+  }
+  if (Array.isArray(config?.agents?.list)) {
+    for (const agent of config.agents.list) {
+      if (agent?.tools?.elevated?.enabled === true) {
+        logger.warn("configManager: rejected write — per-agent tools.elevated.enabled=true", {
+          agentId: agent.id ?? "(unknown)",
+        });
+        throw {
+          statusCode: 400,
+          message: `Refused: tools.elevated.enabled=true is not permitted on agent ${agent.id ?? "(unknown)"}`,
+        };
+      }
+    }
+  }
+}
+
+/**
  * Simple async mutex — prevents concurrent read-modify-write races on the config file.
  * Only protects in-process concurrency; the openclaw gateway has its own atomic write
  * mechanism (temp file + rename) for cross-process safety.
@@ -68,18 +96,32 @@ class ConfigManager {
   }
 
   /**
-   * Write the OpenClaw config
+   * Write the OpenClaw config.
+   *
+   * Defence-in-depth (Wrapper Impl #4): refuses any config that enables
+   * tools.elevated — either globally (`tools.elevated.enabled: true`) or on
+   * any agent (`agents.list[i].tools.elevated.enabled: true`). tools.elevated
+   * is openclaw's escape hatch that runs listed tools on the host with full
+   * gateway privileges (see https://docs.openclaw.ai/gateway/sandbox-vs-tool-policy-vs-elevated.md);
+   * on a shared shard this is a cross-tenant leak vector. Primary enforcement
+   * lives on the orchestrator side (Decision #3 rule 3); this is the wrapper-side
+   * backstop that runs on every write, regardless of which endpoint triggered it.
+   *
    * @param {object} config - Configuration to write
    */
   writeConfig(config) {
     try {
       this.ensureConfigDir();
+      assertNoElevatedTools(config);
       const content = JSON.stringify(config, null, 2);
       logger.debug("Writing OpenClaw config", { path: this.configPath });
       fs.writeFileSync(this.configPath, content, "utf8");
       logger.debug("OpenClaw config written successfully");
       return true;
     } catch (error) {
+      // Re-throw structured errors (statusCode + message) unchanged so HTTP
+      // controllers can propagate the correct status.
+      if (error && typeof error === "object" && error.statusCode) throw error;
       logger.error("Failed to write config", error, { path: this.configPath });
       throw {
         statusCode: 500,

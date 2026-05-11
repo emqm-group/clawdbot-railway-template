@@ -348,8 +348,9 @@ export const updateConfig = async (req, res) => {
     });
   } catch (error) {
     logger.error("Update config failed", error);
+    const status = error && typeof error === "object" && error.statusCode ? error.statusCode : 500;
     return res
-      .status(500)
+      .status(status)
       .json({ error: error.message || "Failed to write config" });
   }
 };
@@ -494,8 +495,9 @@ export const updateAgentConfig = async (req, res) => {
     logger.error("Update agent config failed", error, {
       agentId: req.params?.agentId,
     });
+    const status = error && typeof error === "object" && error.statusCode ? error.statusCode : 500;
     res
-      .status(500)
+      .status(status)
       .json({ error: error.message || "Failed to update agent config" });
   }
 };
