@@ -817,6 +817,68 @@ async function notifyOrchestrator(status, reason) {
 }
 
 /**
+ * Push the wrapper's current plugins block to the orchestrator so its stored
+ * shard config matches what the wrapper just wrote to disk. Decoupled from
+ * notifyOrchestrator (which signals provisioning readiness and flips shard
+ * status to 'active') because this runs on every redeploy of an already-active
+ * shard and must not mutate shard status.
+ *
+ * Best-effort: bounded by a short timeout so an unreachable orchestrator does
+ * not stall the boot path before the gateway starts.
+ */
+async function notifyOrchestratorPluginsRefresh() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
+  const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
+  const shardId = process.env.SHARD_ID?.trim();
+
+  if (!orchestratorUrl || !orchestratorSecret || !shardId) {
+    console.warn(
+      "[wrapper] skipping plugins refresh — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or SHARD_ID not set",
+    );
+    return;
+  }
+
+  let plugins;
+  try {
+    const cfg = configManager.readConfig();
+    plugins = cfg?.plugins ?? null;
+  } catch (err) {
+    console.warn(`[wrapper] skipping plugins refresh — failed to read openclaw.json: ${String(err)}`);
+    return;
+  }
+
+  if (!plugins || typeof plugins !== "object") {
+    console.warn("[wrapper] skipping plugins refresh — no plugins block on disk");
+    return;
+  }
+
+  const url = `${orchestratorUrl}/internal/shards/${encodeURIComponent(shardId)}/plugins`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${orchestratorSecret}`,
+      },
+      body: JSON.stringify({ plugins }),
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      console.log(`[wrapper] orchestrator plugins refresh sent (shard ${shardId})`);
+    } else {
+      const body = await res.text().catch(() => "");
+      console.warn(`[wrapper] orchestrator plugins refresh returned ${res.status}: ${body}`);
+    }
+  } catch (err) {
+    console.warn(`[wrapper] orchestrator plugins refresh failed: ${String(err)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * Auto-setup: runs the full openclaw onboard + gateway config on first boot
  * when OPENCLAW_AUTO_SETUP=true and the required env vars are present.
  * The existing setup UI flow is left completely unchanged.
@@ -2036,8 +2098,10 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   }
 
   // Auto-setup: run full onboard on first boot if env vars are present.
+  let autoSetupRan = false;
   if (!isConfigured() && process.env.OPENCLAW_AUTO_SETUP === "true") {
     await runAutoSetup();
+    autoSetupRan = true;
   }
 
   // Sync gateway tokens in config with the current env var on every startup.
@@ -2079,12 +2143,15 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   // Running here (not just in runAutoSetup) ensures instances provisioned before
   // a plugin was added to this image pick it up automatically on redeploy.
   if (isConfigured()) {
+    let allPluginsWritten = true;
+
     const thirdPartyPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "third-party-tools");
     try {
       await configManager.ensureThirdPartyToolsPlugin(thirdPartyPluginPath);
       console.log("[wrapper] third-party-tools plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write third-party-tools plugin config: ${err.message}`);
+      allPluginsWritten = false;
     }
 
     const kingsCrossPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "king-cross-tools");
@@ -2094,6 +2161,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] king-cross-tools plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write king-cross-tools plugin config: ${err.message}`);
+      allPluginsWritten = false;
     }
 
     // Cross-tenant fs guard — required on every shared shard (Wrapper Impl #6).
@@ -2103,6 +2171,23 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] fs-tenant-guard plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write fs-tenant-guard plugin config: ${err.message}`);
+      allPluginsWritten = false;
+    }
+
+    // Push the now-on-disk plugins block to the orchestrator so its stored
+    // shard config tracks the wrapper-image's plugin set. Without this, a
+    // plugin added to the template after a shard was provisioned (e.g.
+    // fs-tenant-guard on already-active shards) gets wiped on the next
+    // orchestrator → wrapper PUT because the DB copy never learned about it.
+    // Skipped on first boot — notifyOrchestrator("ready") inside runAutoSetup
+    // already shipped this block to the provision-callback endpoint, which
+    // merges it identically. Skipped on partial write because pushing a
+    // partial block would downgrade the DB and wipe an existing plugin on the
+    // next PUT.
+    if (!allPluginsWritten) {
+      console.warn("[wrapper] skipping orchestrator plugins refresh — at least one plugin write failed");
+    } else if (!autoSetupRan) {
+      await notifyOrchestratorPluginsRefresh();
     }
   }
 
