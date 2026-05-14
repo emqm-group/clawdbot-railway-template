@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 
 import express from "express";
+// TODO(cleanup): http-proxy@1.x is unmaintained and emits Node DEP0060
+// (util._extend) deprecation warnings on every boot. Migrate to a maintained
+// fork (e.g. http-proxy-3) or replace with http-proxy-middleware / built-in
+// http.request when convenient.
 import httpProxy from "http-proxy";
 import * as tar from "tar";
 
@@ -2099,7 +2103,7 @@ app.use(requireDashboardAuth, async (req, res) => {
   return proxy.web(req, res, { target: GATEWAY_TARGET });
 });
 
-const server = app.listen(PORT, "0.0.0.0", async () => {
+const server = app.listen(PORT, "::", async () => {
   console.log(`[wrapper] listening on :${PORT}`);
   console.log(`[wrapper] state dir: ${STATE_DIR}`);
   console.log(`[wrapper] workspace dir: ${WORKSPACE_DIR}`);
