@@ -403,6 +403,11 @@ app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
   );
 });
 
+// NOTE (2026-05): the /setup UI onboarding flow is no longer exercised in
+// production — all shards are provisioned by `runAutoSetup()` from env vars.
+// The UI surface (this route, /setup/api/*, AUTH_GROUPS, and the form-paste
+// branch in buildOnboardArgs) is kept intact so we can fall back to manual
+// UI onboarding if needed. Don't delete unless we explicitly retire that fallback.
 app.get("/setup", requireSetupAuth, (_req, res) => {
   // No inline <script>: serve JS from /setup/app.js to avoid any encoding/template-literal issues.
   res.type("html").send(`<!doctype html>
@@ -573,6 +578,15 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 </html>`);
 });
 
+// --auth-choice → process env var openclaw resolves at runtime. Used in
+// buildOnboardArgs() to alias OPENCLAW_AUTH_SECRET into the provider's
+// expected env so the LLM key stays in env and never lands on disk.
+const AUTH_CHOICE_RUNTIME_ENV = {
+  "gemini-api-key": "GEMINI_API_KEY",
+  "openai-api-key": "OPENAI_API_KEY",
+  apiKey: "ANTHROPIC_API_KEY",
+};
+
 const AUTH_GROUPS = [
   {
     value: "openai",
@@ -741,12 +755,22 @@ function buildOnboardArgs(payload) {
 
     const flag = map[payload.authChoice];
 
-    // Effective secret: form field takes priority, fall back to Railway env var.
-    const effectiveSecret = secret || (process.env.OPENCLAW_AUTH_SECRET || "").trim();
+    // SECURITY INVARIANT: when OPENCLAW_AUTH_SECRET is in env (orchestrator
+    // path), the LLM key must never be written to disk. We alias it onto the
+    // provider's runtime env var and run onboard in ref mode so openclaw
+    // persists a SecretRef instead of the value.
+    //
+    // Only honour the env secret when OPENCLAW_AUTH_CHOICE matches the
+    // payload's authChoice — that confirms the env-var secret belongs to the
+    // same provider being configured, not a different one being selected via
+    // /setup UI on top of orchestrator-set env vars.
+    const envSecret = (process.env.OPENCLAW_AUTH_SECRET || "").trim();
+    const envAuthChoice = (process.env.OPENCLAW_AUTH_CHOICE || "").trim();
+    const envSecretForThisChoice =
+      envSecret && envAuthChoice === payload.authChoice ? envSecret : "";
+    const useEnvRefMode = !!envSecretForThisChoice;
+    const effectiveSecret = secret || envSecretForThisChoice;
 
-    // If the user picked an API-key auth choice but no secret is available, fail fast.
-    // Otherwise OpenClaw may fall back to its default auth choice, which looks like the
-    // wizard "reverted" their selection.
     if (flag && !effectiveSecret) {
       throw new Error(
         `Missing auth secret for authChoice=${payload.authChoice}`,
@@ -754,7 +778,28 @@ function buildOnboardArgs(payload) {
     }
 
     if (flag) {
-      args.push(flag, effectiveSecret);
+      if (useEnvRefMode) {
+        const runtimeEnvVar = AUTH_CHOICE_RUNTIME_ENV[payload.authChoice];
+        if (!runtimeEnvVar) {
+          // Refuse to fall back to plaintext-on-disk. Extend
+          // AUTH_CHOICE_RUNTIME_ENV with a verified mapping instead.
+          throw new Error(
+            `authChoice "${payload.authChoice}" has no entry in AUTH_CHOICE_RUNTIME_ENV. ` +
+              `Refusing to write the LLM key to disk — add the provider's runtime env var name and redeploy.`,
+          );
+        }
+        // Aliased on process.env so onboard, the gateway daemon, and per-agent
+        // runtime all inherit it. Safe to mutate — server.js owns this process.
+        process.env[runtimeEnvVar] = envSecret;
+        args.push("--secret-input-mode", "ref");
+        // Intentionally no `--<provider>-api-key <value>`: in ref mode openclaw
+        // resolves the key from env and records only the env-var name.
+      } else {
+        // Dead path today — the /setup UI form is no longer in use (everything
+        // runs through auto-setup). Kept so manual UI onboarding still works
+        // if we ever switch back. See the /setup route note.
+        args.push(flag, effectiveSecret);
+      }
     }
 
     if (payload.authChoice === "token") {
@@ -989,10 +1034,14 @@ async function runAutoSetup() {
     }
   }
 
-  // Set default model if specified
+  // agents.defaults.model is an object per openclaw's schema:
+  // { primary: "<provider/model>", fallbacks?: [...] } — not a bare string.
   const defaultModel = process.env.OPENCLAW_DEFAULT_MODEL?.trim();
   if (defaultModel) {
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "agents.defaults.model", defaultModel]));
+    await runCmd(OPENCLAW_NODE, clawArgs([
+      "config", "set", "--json", "agents.defaults.model",
+      JSON.stringify({ primary: defaultModel }),
+    ]));
     console.log(`[auto-setup] default model set to ${defaultModel}`);
   }
 
@@ -1004,10 +1053,6 @@ async function runAutoSetup() {
   // — the notifications router POSTs here to nudge agents). Disabled by default per docs.
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "gateway.http.endpoints.chatCompletions.enabled", "true"]));
   console.log("[auto-setup] gateway.http.endpoints.chatCompletions.enabled set to true");
-
-  // Enable session tools visibility for all agents
-  await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "tools.sessions.visibility", "all"]));
-  console.log("[auto-setup] tools.sessions.visibility set to all");
 
   // Write the third-party-tools plugin config block directly into openclaw.json.
   // This replaces CLI-based install --link + enable calls, which were unreliable
