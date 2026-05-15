@@ -582,14 +582,36 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 </html>`);
 });
 
-// --auth-choice → process env var openclaw resolves at runtime. Used in
-// buildOnboardArgs() to alias OPENCLAW_AUTH_SECRET into the provider's
-// expected env so the LLM key stays in env and never lands on disk.
+// --auth-choice → process env var openclaw resolves at runtime. Used to alias
+// OPENCLAW_AUTH_SECRET into the provider's expected env so the LLM key stays
+// in env and never lands on disk.
 const AUTH_CHOICE_RUNTIME_ENV = {
   "gemini-api-key": "GEMINI_API_KEY",
   "openai-api-key": "OPENAI_API_KEY",
   apiKey: "ANTHROPIC_API_KEY",
 };
+
+// Mirror OPENCLAW_AUTH_SECRET onto the provider's runtime env var (e.g.
+// GEMINI_API_KEY) every time the wrapper starts. Required so already-onboarded
+// shards (where runAutoSetup is skipped) still expose the key in env for the
+// gateway and per-agent runtime to resolve — and so we can safely drop any
+// auth-profiles.json files that were previously written with plaintext.
+function aliasLlmAuthEnvVar() {
+  const authChoice = (process.env.OPENCLAW_AUTH_CHOICE || "").trim();
+  const authSecret = (process.env.OPENCLAW_AUTH_SECRET || "").trim();
+  if (!authChoice || !authSecret) return;
+
+  const runtimeEnvVar = AUTH_CHOICE_RUNTIME_ENV[authChoice];
+  if (!runtimeEnvVar) {
+    console.warn(
+      `[wrapper] OPENCLAW_AUTH_CHOICE="${authChoice}" has no entry in AUTH_CHOICE_RUNTIME_ENV — runtime LLM auth env var was not aliased. Agents will fail until a mapping is added.`,
+    );
+    return;
+  }
+
+  process.env[runtimeEnvVar] = authSecret;
+  console.log(`[wrapper] aliased OPENCLAW_AUTH_SECRET → ${runtimeEnvVar}`);
+}
 
 const AUTH_GROUPS = [
   {
@@ -2125,6 +2147,10 @@ const server = app.listen(PORT, "::", async () => {
       "[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.",
     );
   }
+
+  // Alias LLM auth env var before any openclaw subprocess (onboard / gateway)
+  // is spawned so the key is available in their inherited env.
+  aliasLlmAuthEnvVar();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
