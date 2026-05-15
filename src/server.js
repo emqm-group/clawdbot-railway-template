@@ -805,18 +805,16 @@ function buildOnboardArgs(payload) {
 
     if (flag) {
       if (useEnvRefMode) {
-        const runtimeEnvVar = AUTH_CHOICE_RUNTIME_ENV[payload.authChoice];
-        if (!runtimeEnvVar) {
-          // Refuse to fall back to plaintext-on-disk. Extend
-          // AUTH_CHOICE_RUNTIME_ENV with a verified mapping instead.
+        // aliasLlmAuthEnvVar() ran at startup and already set the runtime env
+        // var. Validate the same mapping exists here so we hard-fail rather
+        // than silently degrading to plaintext if a provider was added to the
+        // wrapper without a corresponding AUTH_CHOICE_RUNTIME_ENV entry.
+        if (!AUTH_CHOICE_RUNTIME_ENV[payload.authChoice]) {
           throw new Error(
             `authChoice "${payload.authChoice}" has no entry in AUTH_CHOICE_RUNTIME_ENV. ` +
               `Refusing to write the LLM key to disk — add the provider's runtime env var name and redeploy.`,
           );
         }
-        // Aliased on process.env so onboard, the gateway daemon, and per-agent
-        // runtime all inherit it. Safe to mutate — server.js owns this process.
-        process.env[runtimeEnvVar] = envSecret;
         args.push("--secret-input-mode", "ref");
         // Intentionally no `--<provider>-api-key <value>`: in ref mode openclaw
         // resolves the key from env and records only the env-var name.
