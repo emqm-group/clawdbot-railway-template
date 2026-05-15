@@ -485,8 +485,6 @@ class ConfigManager {
       "kc_get_task",
       "kc_update_task",
       "kc_create_task",
-      "kc_register_artifact",
-      "kc_delete_artifact",
     ];
     return this.patchGlobalToolsAlsoAllow("add", KC_TOOLS);
   }

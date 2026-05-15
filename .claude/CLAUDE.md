@@ -8,6 +8,15 @@
 
 ---
 
+# ⚠️ AGENT tools.allow MUST INCLUDE CORE TOOLS
+**Every agent's `tools.allow` array MUST include at least one core tool (e.g. `read`, `write`).** Default to including `read` and `write`.
+
+**Why:** openclaw silently strips a `tools.allow` list that contains ONLY plugin/third-party tools — the agent then gets allow-all and inherits everything in global `tools.alsoAllow` (and any other tool). See [src/agents/tool-policy.ts:172-194](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/tool-policy.ts#L172-L194). This breaks per-agent isolation — most importantly, composio/third-party tools meant for one agent leak to all agents.
+
+**Rule applies to:** any agent config we write (base agent slices, tenant agent entries, orchestrator-managed agents). Always include `read` and `write` (or another core tool) alongside plugin-specific entries.
+
+---
+
 # Persona: Openclaw Engineer
 
 Your name is **Openclaw Engineer**. You are a senior engineer who built and maintains openclaw and its Railway deployment wrapper. Direct, terse, expert. No preamble, no summaries, no filler. Lead with code or facts. One sentence max per explanation unless complexity demands more. No bullet summaries of what you just did.
@@ -208,6 +217,51 @@ Used with `--secret-input-mode ref` in non-interactive onboard.
 ## API key rotation
 Priority: `OPENCLAW_LIVE_<P>_KEY` > `<P>_API_KEYS` (comma list) > `<P>_API_KEY` > `<P>_API_KEY_*`
 Rotation triggers on 429 only.
+
+## Tool policy resolution (verified against v2026.3.8)
+
+Pinned openclaw build is `v2026.3.8` (see `Dockerfile`). All citations below refer to that tag.
+
+### Policy stages (every non-empty allow must pass)
+
+Pipeline order at [src/agents/tool-policy-pipeline.ts:32-62](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/tool-policy-pipeline.ts#L32-L62):
+`tools.profile` → `tools.byProvider.profile` → global `tools.allow` → global `tools.byProvider.allow` → agent `tools.allow` → agent `tools.byProvider.allow` → group → sandbox → subagent.
+
+Matcher rule at [pi-tools.policy.ts:30-32](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/pi-tools.policy.ts#L30-L32): **empty `allow` (length 0 or undefined) = allow-all at that stage.** Only non-empty `allow` constrains.
+
+### `tools.allow` plugin-only stripping (CRITICAL)
+
+[tool-policy.ts:172-194](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/tool-policy.ts#L172-L194): if a `tools.allow` array (at any scope) contains ONLY plugin tools and no core tools, the entire array is replaced with `undefined` → allow-all. Logs warning: `"Ignoring allowlist so core tools remain available. Use tools.alsoAllow for additive plugin tool enablement."`
+
+This is why the "AGENT tools.allow MUST INCLUDE CORE TOOLS" rule above exists. Always include `read`/`write`.
+
+### `tools.alsoAllow` (additive, never restrictive)
+
+- Lives at top-level `tools.alsoAllow` and per-agent `agents.list[].tools.alsoAllow`.
+- Merged INTO the profile's allowlist at [pi-tools.ts:295](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/pi-tools.ts#L295) via `mergeAlsoAllowPolicy`.
+- Resolution at [pi-tools.policy.ts:261-262](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/pi-tools.policy.ts#L261-L262): agent's `alsoAllow` takes precedence; otherwise falls back to global. **They do NOT union.**
+- Schema rejects setting both `allow` and `alsoAllow` non-empty in the same scope ([zod-schema.agent-runtime.ts:546](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/config/zod-schema.agent-runtime.ts#L546)).
+- This is the supported additive path used by our wrapper for plugin tools — see [configManager.js:258-261](src/agents/utils/configManager.js#L258-L261) and `ensureKingsCrossToolsAlsoAllow()`.
+
+### Tool profiles ([tool-catalog.ts:41-259](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/tool-catalog.ts#L41-L259))
+
+| Profile | Tools |
+|---|---|
+| `minimal` | `session_status` |
+| `coding` | `read`, `write`, `edit`, `apply_patch`, `exec`, `process`, `memory_search`, `memory_get`, `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `subagents`, `session_status`, `cron`, `image` |
+| `messaging` | `message`, `sessions_list`, `sessions_history`, `sessions_send`, `session_status` |
+| `full` | `{}` (allow-all) |
+
+NOT in `coding`: `web_search`, `web_fetch`, `browser`, `canvas`, `message`, `gateway`, `nodes`, `agents_list`, `tts`.
+
+### Inter-agent communication gating
+
+`sessions_send` is in the `coding` profile, but cross-agent calls are blocked at runtime by a separate gate at [sessions-access.ts:90-123](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/agents/tools/sessions-access.ts#L90-L123):
+
+- Default `tools.agentToAgent.enabled = false` ([types.tools.ts:557](https://github.com/openclaw/openclaw/blob/v2026.3.8/src/config/types.tools.ts#L557)).
+- Same-agent (own session + spawned subagent tree per `tools.sessions.visibility` default `"tree"`): always allowed.
+- Cross-agent: requires `tools.agentToAgent.enabled = true`. Optional `tools.agentToAgent.allow` patterns gate target agent IDs.
+- Error when blocked: `"Agent-to-agent messaging is disabled. Set tools.agentToAgent.enabled=true to allow cross-agent sends."`
 
 ---
 
