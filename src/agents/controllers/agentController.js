@@ -18,6 +18,85 @@ function getAgentConfigEntry(agentId) {
 }
 
 /**
+ * Seed <agentDir>/auth-profiles.json by copying from the main agent's profile.
+ *
+ * Works around openclaw#44571 — `openclaw agents add` only writes the auth
+ * store for the main agent. Non-main agents otherwise hit "No API key found"
+ * on first use. Mirrors what scripts/seed-missing-auth-profiles.js does, but
+ * applied at create-time so the gap never opens.
+ *
+ * Skips silently when:
+ *   - the new agent already has an auth-profiles.json (idempotent)
+ *   - main's auth-profiles.json doesn't exist (shard not onboarded yet)
+ *   - main still has plaintext `key` (would propagate plaintext to the new
+ *     agent — refuse and tell the operator to run the migrate script first)
+ */
+async function seedAgentAuthProfilesFromMain(agentId, agentDir) {
+  const stateDir =
+    process.env.OPENCLAW_STATE_DIR?.trim() || "/data/.openclaw";
+  const mainAuthPath = path.join(
+    stateDir,
+    "agents",
+    "main",
+    "agent",
+    "auth-profiles.json",
+  );
+  const newAuthPath = path.join(agentDir, "auth-profiles.json");
+
+  try {
+    await fs.access(newAuthPath);
+    return; // already seeded — idempotent
+  } catch {}
+
+  let mainRaw;
+  try {
+    mainRaw = await fs.readFile(mainAuthPath, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      logger.warn(
+        "Agent created but main auth-profiles.json is missing — agent will lack auth until shard is re-onboarded",
+        { agentId, mainAuthPath },
+      );
+    } else {
+      logger.warn("Agent created but failed to read main auth-profiles.json", {
+        agentId,
+        mainAuthPath,
+        error: err.message,
+      });
+    }
+    return;
+  }
+
+  const mainAuth = JSON.parse(mainRaw);
+  const hasPlaintext = Object.values(mainAuth.profiles ?? {}).some(
+    (p) => p.type === "api_key" && typeof p.key === "string",
+  );
+  if (hasPlaintext) {
+    logger.warn(
+      "Refusing to seed auth-profiles: main still has plaintext key. Run scripts/migrate-auth-profiles-to-keyref.js first, then call scripts/seed-missing-auth-profiles.js to backfill this agent.",
+      { agentId },
+    );
+    return;
+  }
+
+  await fs.mkdir(agentDir, { recursive: true });
+  const payload = {
+    version: mainAuth.version,
+    profiles: mainAuth.profiles,
+    usageStats: {},
+  };
+  await fs.writeFile(
+    newAuthPath,
+    JSON.stringify(payload, null, 2) + "\n",
+    "utf8",
+  );
+  logger.info("Seeded agent auth-profiles.json from main", {
+    agentId,
+    newAuthPath,
+  });
+}
+
+/**
  * POST /api/agents
  * Create a new agent in this openclaw instance.
  * Body: { agentId: string, name?: string }
@@ -49,6 +128,17 @@ export const createAgent = async (req, res) => {
       agentDir,
       name: agentName,
     });
+
+    // Workaround for openclaw#44571 — must seed auth-profiles ourselves.
+    // Non-fatal: agent is already registered; operator can fix manually.
+    try {
+      await seedAgentAuthProfilesFromMain(agentId, agentDir);
+    } catch (err) {
+      logger.warn("Failed to seed agent auth-profiles.json", {
+        agentId,
+        error: err.message,
+      });
+    }
 
     logger.info("Agent created successfully", { agentId });
 
