@@ -28,6 +28,13 @@ router.put("/config", agentController.updateConfig);
 router.get("/:agentId/vars", agentController.getTemplateVars);
 
 /**
+ * POST /api/agents/batch
+ * Create many agents in a single call. Body: { agents: [{ agentId, name? }] }
+ * Returns { success, results: [{ agentId, status, error? }], config }
+ */
+router.post("/batch", agentController.batchCreateAgents);
+
+/**
  * PUT /api/agents/batch/config-files
  * Write config files for multiple agents and optionally reset their sessions.
  * Body: { agents: [{ agentId, files }], resetSessions?: boolean }

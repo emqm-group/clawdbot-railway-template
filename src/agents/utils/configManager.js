@@ -188,6 +188,36 @@ class ConfigManager {
   }
 
   /**
+   * Upsert multiple agents in a single write — used by POST /api/agents/batch
+   * to collapse N per-agent wrapper writes into one. Each `openclaw agents add`
+   * CLI call has already written its own entry to openclaw.json; this re-reads
+   * the now-current config and patches workspace / agentDir / name for every
+   * created agent in a single mutex-protected write.
+   * @param {Array<{ agentId: string, workspace: string, agentDir: string, name: string }>} agentUpdates
+   * @returns {Promise<object>} - The updated config
+   */
+  batchUpsertAgentsInConfig(agentUpdates) {
+    return this._mutex.acquire(() => {
+      const config = this.readConfig();
+      if (!config.agents) config.agents = { list: [], defaults: {} };
+      if (!Array.isArray(config.agents.list)) config.agents.list = [];
+
+      for (const { agentId, workspace, agentDir, name } of agentUpdates) {
+        const entry = { id: agentId, workspace, agentDir, name };
+        const idx = config.agents.list.findIndex((a) => a.id === agentId);
+        if (idx >= 0) {
+          config.agents.list[idx] = { ...config.agents.list[idx], ...entry };
+        } else {
+          config.agents.list.push(entry);
+        }
+      }
+
+      this.writeConfig(config);
+      return config;
+    });
+  }
+
+  /**
    * Remove an agent from the config.
    * Serialised via mutex to prevent concurrent read-modify-write races.
    * @param {string} agentId - Agent ID to remove

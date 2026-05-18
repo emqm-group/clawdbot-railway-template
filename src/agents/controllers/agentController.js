@@ -152,6 +152,160 @@ export const createAgent = async (req, res) => {
 };
 
 /**
+ * POST /api/agents/batch
+ * Create multiple agents in a single call. Body:
+ *   { agents: [{ agentId: string, name?: string }, ...] }
+ *
+ * Behaviour:
+ *   - Sequential `openclaw agents add` calls (parallel would race the
+ *     openclaw.json writer).
+ *   - Continue-on-error: a failed agent does not abort the batch.
+ *   - Idempotent: agents already present in openclaw.json get status "skipped".
+ *   - Single trailing wrapper write patches workspace / agentDir / name for
+ *     every created agent in one go (collapses N wrapper writes into 1; the
+ *     CLI still writes once per agent).
+ *   - Health-polls the gateway once at the end; 207 if unhealthy.
+ *
+ * Returns the full final openclaw.json so the orchestrator can skip a
+ * follow-up GET /api/agents/config before its own merge.
+ */
+export const batchCreateAgents = async (req, res) => {
+  try {
+    const { agents } = req.body ?? {};
+
+    if (!Array.isArray(agents) || agents.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "'agents' must be a non-empty array" });
+    }
+
+    logger.info("POST /api/agents/batch - Batch create agents", {
+      count: agents.length,
+    });
+
+    // Snapshot existing IDs once — used to skip duplicates without re-reading
+    // openclaw.json between agents. We add to the set as we create, so
+    // duplicates within the same batch body also collapse correctly.
+    const initialConfig = configManager.readConfig();
+    const seenIds = new Set(
+      (initialConfig.agents?.list ?? []).map((a) => a.id),
+    );
+
+    const results = [];
+    const createdAgents = [];
+
+    for (const entry of agents) {
+      const { agentId, name } = entry ?? {};
+
+      if (!agentId || typeof agentId !== "string") {
+        results.push({
+          agentId: agentId ?? null,
+          status: "failed",
+          error: "agentId is required and must be a string",
+        });
+        continue;
+      }
+
+      // Guard against path-traversal in workspace / agentDir paths.
+      if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) {
+        results.push({
+          agentId,
+          status: "failed",
+          error:
+            "Invalid agentId — must contain only letters, numbers, hyphens, and underscores",
+        });
+        continue;
+      }
+
+      if (seenIds.has(agentId)) {
+        results.push({ agentId, status: "skipped" });
+        continue;
+      }
+
+      const agentName = name || agentId;
+      const workspace = `/data/.openclaw/workspace-${agentId}`;
+      const agentDir = `/data/.openclaw/agents/${agentId}/agent`;
+
+      try {
+        await openclawService.createAgent(agentId, { workspace });
+        await fs.mkdir(workspace, { recursive: true });
+        await fs.writeFile(path.join(workspace, "MEMORY.md"), "", "utf8");
+
+        // Workaround for openclaw#44571 — non-fatal.
+        try {
+          await seedAgentAuthProfilesFromMain(agentId, agentDir);
+        } catch (err) {
+          logger.warn("Batch: failed to seed agent auth-profiles.json", {
+            agentId,
+            error: err.message,
+          });
+        }
+
+        createdAgents.push({ agentId, workspace, agentDir, name: agentName });
+        seenIds.add(agentId);
+        results.push({ agentId, status: "created" });
+        logger.info("Batch: agent created", { agentId });
+      } catch (err) {
+        const errMsg = err?.message || err?.details || String(err);
+        logger.error("Batch: agent creation failed", err, { agentId });
+        results.push({ agentId, status: "failed", error: errMsg });
+      }
+    }
+
+    // Nothing was written this call — skip the trailing write and health poll.
+    // Covers the retry-the-batch case where every entry was already present.
+    if (createdAgents.length === 0) {
+      logger.info("Batch: no agents created (all skipped/failed)", {
+        requested: agents.length,
+        skipped: results.filter((r) => r.status === "skipped").length,
+        failed: results.filter((r) => r.status === "failed").length,
+      });
+      return res.json({
+        success: true,
+        results,
+        config: configManager.readConfig(),
+      });
+    }
+
+    // Single trailing wrapper write — patches workspace / agentDir / name
+    // for every successfully created agent in one mutex-protected write.
+    await configManager.batchUpsertAgentsInConfig(createdAgents);
+
+    const finalConfig = configManager.readConfig();
+
+    // Mirror PUT /api/agents/config: poll health, return 207 if unhealthy.
+    const health = await openclawService.pollGatewayHealth();
+    if (!health.healthy) {
+      logger.warn("Batch: gateway unhealthy after batch create", {
+        details: health.details,
+      });
+      return res.status(207).json({
+        success: true,
+        warning:
+          "Batch completed but gateway is not healthy — it may have rejected the new config",
+        gatewayDetails: health.details,
+        results,
+        config: finalConfig,
+      });
+    }
+
+    logger.info("Batch: complete", {
+      requested: agents.length,
+      created: results.filter((r) => r.status === "created").length,
+      skipped: results.filter((r) => r.status === "skipped").length,
+      failed: results.filter((r) => r.status === "failed").length,
+    });
+
+    return res.json({ success: true, results, config: finalConfig });
+  } catch (error) {
+    logger.error("Batch create agents failed", error);
+    return res
+      .status(500)
+      .json({ error: error.message || "Failed to batch create agents" });
+  }
+};
+
+/**
  * GET /api/agents/:agentId/vars
  * Return the list of {{VAR}} placeholder names required by a template agent's
  * template files (/data/.openclaw/workspace-{agentId}/templates/).
