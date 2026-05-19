@@ -66,6 +66,7 @@ export default function register(api) {
         const t = data.task;
         const projected = {
           id: t.id,
+          task_name: t.task_name ?? null,
           task_type_name: t.task_type_name ?? null,
           task_description: t.task_description,
         };
@@ -73,7 +74,7 @@ export default function register(api) {
           const skillName = t.directive_filename.replace(/\.md$/i, "");
           projected.skill_path = `/data/.openclaw/workspace-${agentId}/skills/${skillName}/SKILL.md`;
         }
-        log("kc_get_next_task", "task found", { agentId, taskId: t.id, task_type_name: projected.task_type_name, skill_path: projected.skill_path ?? null });
+        log("kc_get_next_task", "task found", { agentId, taskId: t.id, task_name: projected.task_name, task_type_name: projected.task_type_name, skill_path: projected.skill_path ?? null });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };
       } catch (err) {
         logError("kc_get_next_task", err.message, { agentId });
@@ -115,6 +116,7 @@ export default function register(api) {
         }
         const projected = {
           id: t.id,
+          task_name: t.task_name ?? null,
           task_type_name: t.task_type_name ?? null,
           task_description: t.task_description,
           execution_status: t.execution_status,
@@ -134,6 +136,7 @@ export default function register(api) {
           taskId,
           execution_status: projected.execution_status,
           artifactCount: projected.artifacts.length,
+          task_name: projected.task_name,
           task_type_name: projected.task_type_name,
           skill_path: projected.skill_path ?? null,
         });
@@ -212,29 +215,27 @@ export default function register(api) {
     },
   }));
 
-  // kc_create_task — create a new task assigned to another agent (runtime delegation).
+  // kc_create_task — create a new task (runtime delegation).
   // The calling agent (ctx.agentId) is recorded as created_by_agent_id.
+  // The orchestrator resolves the owning agent from `taskName` (globally
+  // unique) via the task_name → task_type → owning_agent chain.
   api.registerTool((ctx) => ({
     name: "kc_create_task",
     description:
-      "Create a new task assigned to another agent. Use this to delegate work at runtime. assignedToAgentId is the target agent; taskTypeName names the task type (the orchestrator selects the directive/skill from the task type + assigned agent + approval mode). priority defaults to end-of-queue if omitted.",
+      "Create a new task. Use this to delegate work at runtime. taskName identifies the specific operation (globally unique across all task types); the orchestrator resolves the owning agent and the directive/skill from taskName. priority defaults to end-of-queue if omitted.",
     parameters: {
       type: "object",
-      required: ["assignedToAgentId", "taskDescription", "taskTypeName"],
+      required: ["taskName", "taskDescription"],
       additionalProperties: false,
       properties: {
-        assignedToAgentId: {
+        taskName: {
           type: "string",
-          description: "Agent ID of the agent this task is assigned to.",
+          description:
+            "Globally-unique name of the operation. The orchestrator uses this to resolve the owning agent, the task type, and the directive/skill that tells the assigned agent how to execute the task.",
         },
         taskDescription: {
           type: "string",
           description: "What the assigned agent should do.",
-        },
-        taskTypeName: {
-          type: "string",
-          description:
-            "Name of the task type. The orchestrator uses this (plus the assigned agent and approval mode) to resolve the directive/skill that tells the assigned agent how to execute the task.",
         },
         priority: {
           type: "integer",
@@ -243,18 +244,18 @@ export default function register(api) {
         },
       },
     },
-    async execute(_toolCallId, { assignedToAgentId, taskDescription, taskTypeName, priority }) {
+    async execute(_toolCallId, { taskName, taskDescription, priority }) {
       const agentId = ctx.agentId;
-      log("kc_create_task", "called", { agentId, assignedToAgentId, taskTypeName, priority: priority ?? null });
+      log("kc_create_task", "called", { agentId, taskName, priority: priority ?? null });
       try {
-        const body = { agentId, assignedToAgentId, taskDescription, taskTypeName };
+        const body = { agentId, taskName, taskDescription };
         if (priority !== undefined) body.priority = priority;
         const data = await callWrapper("POST", "", body);
         const projected = { id: data.task?.id };
-        log("kc_create_task", "success", { agentId, assignedToAgentId, taskId: projected.id });
+        log("kc_create_task", "success", { agentId, taskName, taskId: projected.id });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };
       } catch (err) {
-        logError("kc_create_task", err.message, { agentId, assignedToAgentId });
+        logError("kc_create_task", err.message, { agentId, taskName });
         return errorResult(err.message);
       }
     },
