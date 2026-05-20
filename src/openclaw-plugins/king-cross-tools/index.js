@@ -222,7 +222,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "kc_create_task",
     description:
-      "Create a new task. Use this to delegate work at runtime. taskName identifies the specific operation (globally unique across all task types); the orchestrator resolves the owning agent and the directive/skill from taskName. priority defaults to end-of-queue if omitted.",
+      "Create a new task. Use this to delegate work at runtime. taskName identifies the specific operation (globally unique across all task types); the orchestrator resolves the owning agent and the directive/skill from taskName. priority defaults to end-of-queue if omitted. timeTrigger (optional) defers eligibility until a wall-clock instant in the tenant's timezone.",
     parameters: {
       type: "object",
       required: ["taskName", "taskDescription"],
@@ -242,20 +242,27 @@ export default function register(api) {
           description:
             "Task priority. Lower value = higher priority. Omit to place at end of queue.",
         },
+        timeTrigger: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 local datetime (YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM:SS), no timezone offset and no 'Z' suffix. Interpreted in the tenant's timezone. The task is invisible to the assigned agent's queue until this moment passes; eligibility is enforced approximately, not in real time. Must resolve to a future instant.",
+          pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$",
+        },
       },
     },
-    async execute(_toolCallId, { taskName, taskDescription, priority }) {
+    async execute(_toolCallId, { taskName, taskDescription, priority, timeTrigger }) {
       const agentId = ctx.agentId;
-      log("kc_create_task", "called", { agentId, taskName, priority: priority ?? null });
+      log("kc_create_task", "called", { agentId, taskName, priority: priority ?? null, timeTrigger: timeTrigger ?? null });
       try {
         const body = { agentId, taskName, taskDescription };
         if (priority !== undefined) body.priority = priority;
+        if (timeTrigger !== undefined) body.timeTrigger = timeTrigger;
         const data = await callWrapper("POST", "", body);
         const projected = { id: data.task?.id };
         log("kc_create_task", "success", { agentId, taskName, taskId: projected.id });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };
       } catch (err) {
-        logError("kc_create_task", err.message, { agentId, taskName });
+        logError("kc_create_task", err.message, { agentId, taskName, timeTrigger: timeTrigger ?? null });
         return errorResult(err.message);
       }
     },
