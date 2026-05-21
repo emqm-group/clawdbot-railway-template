@@ -13,6 +13,7 @@ export function createDirectivesRouter(gatewayToken, restartGateway) {
 
   router.get("/:agentId", (req, res) => directivesController.list(req, res));
   router.post("/:agentId", (req, res) => directivesController.create(req, res, restartGateway));
+  router.post("/:agentId/bulk", (req, res) => directivesController.bulkUpsert(req, res, restartGateway));
   router.get("/:agentId/:name", (req, res) => directivesController.get(req, res));
   router.put("/:agentId/:name", (req, res) => directivesController.update(req, res, restartGateway));
   router.delete("/:agentId/:name", (req, res) => directivesController.remove(req, res, restartGateway));

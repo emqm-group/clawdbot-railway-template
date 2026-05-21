@@ -202,6 +202,91 @@ export async function update(req, res, restartGateway) {
 }
 
 /**
+ * POST /api/directives/:agentId/bulk?deferRestart=0|1
+ * Upsert a batch of directives. Existing skills are overwritten, missing ones are created.
+ *
+ * Body: { directives: [{ name, description, content }, ...] }
+ *
+ * Query:
+ *   deferRestart=0 (default) — wrapper calls restartGateway() once after the batch
+ *   deferRestart=1 — skip restart; caller must POST /api/gateway/restart when done
+ *
+ * Per-skill failures do not abort the batch.
+ * Returns { results: [{ name, action: 'created'|'updated'|'failed', error? }] }.
+ */
+export async function bulkUpsert(req, res, restartGateway) {
+  const { agentId } = req.params;
+  const { directives } = req.body;
+  const deferRestart = req.query.deferRestart === "1" || req.query.deferRestart === "true";
+
+  if (!Array.isArray(directives) || directives.length === 0) {
+    return res.status(400).json({ error: "directives must be a non-empty array" });
+  }
+
+  const skillsDir = getSkillsDir(agentId);
+  if (!skillsDir) {
+    return res.status(404).json({ error: `Agent ${agentId} not found` });
+  }
+
+  const results = [];
+
+  for (const entry of directives) {
+    const { name, description, content } = entry || {};
+
+    if (!name || typeof name !== "string") {
+      results.push({ name: name ?? null, action: "failed", error: "name is required" });
+      continue;
+    }
+    if (!validateName(name)) {
+      results.push({ name, action: "failed", error: "name must be snake_case (a-z, 0-9, _, -)" });
+      continue;
+    }
+    if (!description || typeof description !== "string") {
+      results.push({ name, action: "failed", error: "description is required" });
+      continue;
+    }
+    if (typeof content !== "string") {
+      results.push({ name, action: "failed", error: "content is required" });
+      continue;
+    }
+
+    const skillDir = path.join(skillsDir, name);
+    const skillPath = path.join(skillDir, "SKILL.md");
+    const existed = fs.existsSync(skillPath);
+
+    try {
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(skillPath, buildSkillMd(name, description, content), "utf8");
+      results.push({ name, action: existed ? "updated" : "created" });
+    } catch (err) {
+      logger.error("directivesController.bulkUpsert: failed to write", { agentId, name, error: err.message });
+      results.push({ name, action: "failed", error: err.message });
+    }
+  }
+
+  const succeeded = results.filter((r) => r.action !== "failed").length;
+  logger.info("directivesController.bulkUpsert: batch complete", {
+    agentId,
+    total: results.length,
+    succeeded,
+    failed: results.length - succeeded,
+    deferRestart,
+  });
+
+  res.json({ results });
+
+  if (deferRestart) return;
+  if (succeeded === 0) return;
+
+  try {
+    await restartGateway();
+    logger.info("directivesController.bulkUpsert: gateway restarted", { agentId });
+  } catch (err) {
+    logger.error("directivesController.bulkUpsert: gateway restart failed", { error: err.message });
+  }
+}
+
+/**
  * DELETE /api/directives/:agentId/:name
  * Delete a directive.
  */
