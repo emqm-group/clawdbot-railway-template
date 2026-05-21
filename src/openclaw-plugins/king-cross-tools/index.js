@@ -222,7 +222,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "kc_create_task",
     description:
-      "Create a new task. Use this to delegate work at runtime. taskName identifies the specific operation (globally unique across all task types); the orchestrator resolves the owning agent and the directive/skill from taskName. priority defaults to end-of-queue if omitted. timeTrigger (optional) defers eligibility until a wall-clock instant in the tenant's timezone.",
+      "Create a new task. Use this to delegate work at runtime. taskName identifies the specific operation (globally unique across all task types); the orchestrator resolves the owning agent and the directive/skill from taskName. priority defaults to end-of-queue if omitted. timeTrigger (optional) defers eligibility until a wall-clock time-of-day later today in the tenant's timezone.",
     parameters: {
       type: "object",
       required: ["taskName", "taskDescription"],
@@ -245,8 +245,8 @@ export default function register(api) {
         timeTrigger: {
           type: "string",
           description:
-            "Optional. ISO 8601 local datetime (YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM:SS), no timezone offset and no 'Z' suffix. Interpreted in the tenant's timezone. The task is invisible to the assigned agent's queue until this moment passes; eligibility is enforced approximately, not in real time. Must resolve to a future instant.",
-          pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$",
+            "Optional. Tenant-local time-of-day as HH:MM (zero-padded, hours 00-23, minutes 00-59). No date, no seconds, no timezone — the orchestrator stamps today's date in the tenant's timezone. Same-day, later-today only; earlier-today is rejected. The task is invisible to the assigned agent's queue until this moment passes; eligibility is enforced approximately, not in real time.",
+          pattern: "^([01]\\d|2[0-3]):[0-5]\\d$",
         },
       },
     },
