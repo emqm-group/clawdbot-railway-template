@@ -6,8 +6,9 @@
 // is no JWT_SECRET, no signing, no expiry; just a constant-time compare against
 // the value the orchestrator provisions onto the shard's Railway service.
 //
-// Loopback-only endpoints (`/api/tools/invoke`, `/api/tasks/*`) keep their
-// existing IP guards and do NOT use this middleware.
+// Loopback-only endpoints (`/api/tools/invoke`, `/api/tasks/*`,
+// `/api/deep-lattice/*`) keep their existing IP guards and do NOT use this
+// middleware.
 
 import crypto from "node:crypto";
 

@@ -1,0 +1,9 @@
+{
+  "id": "deep-lattice-tools",
+  "name": "Deep Lattice Tools",
+  "description": "Deep Lattice file-access tools: read profile slugs, read/list knowledge files, write profile slugs (MM), create/list/read founder briefings (CRO).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
