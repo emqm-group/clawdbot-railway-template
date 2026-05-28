@@ -1090,6 +1090,11 @@ async function runAutoSetup() {
   await configManager.ensureKingsCrossToolsAlsoAllow();
   console.log("[auto-setup] king-cross-tools plugin config written");
 
+  const deepLatticePluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "deep-lattice-tools");
+  await configManager.ensureDeepLatticeToolsPlugin(deepLatticePluginPath);
+  await configManager.ensureDeepLatticeToolsAlsoAllow();
+  console.log("[auto-setup] deep-lattice-tools plugin config written");
+
   // Cross-tenant fs guard — non-negotiable on shared shards (Wrapper Impl #6).
   const fsTenantGuardPath = path.join(APP_ROOT, "src", "openclaw-plugins", "fs-tenant-guard");
   await configManager.ensureFsTenantGuardPlugin(fsTenantGuardPath);
@@ -2234,6 +2239,16 @@ const server = app.listen(PORT, "::", async () => {
       console.log("[wrapper] king-cross-tools plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write king-cross-tools plugin config: ${err.message}`);
+      allPluginsWritten = false;
+    }
+
+    const deepLatticePluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "deep-lattice-tools");
+    try {
+      await configManager.ensureDeepLatticeToolsPlugin(deepLatticePluginPath);
+      await configManager.ensureDeepLatticeToolsAlsoAllow();
+      console.log("[wrapper] deep-lattice-tools plugin config ensured");
+    } catch (err) {
+      console.warn(`[wrapper] failed to write deep-lattice-tools plugin config: ${err.message}`);
       allPluginsWritten = false;
     }
 

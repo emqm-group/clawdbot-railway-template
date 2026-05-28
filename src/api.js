@@ -3,7 +3,8 @@
  *
  * All inbound /api/* routes authenticate against a single per-shard Bearer:
  * OPENCLAW_GATEWAY_TOKEN (Decision #8 / Wrapper Impl #2). Loopback-only
- * endpoints (/api/tools/invoke, /api/tasks/*) keep their existing IP guards.
+ * endpoints (/api/tools/invoke, /api/tasks/*, /api/deep-lattice/*) keep
+ * their existing IP guards.
  */
 import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
@@ -12,6 +13,7 @@ import { createToolsRouter } from "./agents/routes/toolsRoutes.js";
 import { createDirectivesRouter } from "./agents/routes/directivesRoutes.js";
 import { createNotificationsRouter } from "./api/notifications.js";
 import { createTasksRouter } from "./api/tasks.js";
+import { createDeepLatticeRouter } from "./api/deepLattice.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 import openclawService from "./agents/utils/openclawService.js";
@@ -42,6 +44,13 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
   // gateway. Looks up tenantId via the tenant-mapping cache (Wrapper Impl #3)
   // and forwards to /internal/tasks/* with the agentId carried in the body.
   app.use("/api/tasks", createTasksRouter());
+
+  // Deep Lattice proxy — loopback-only, called by deep-lattice-tools plugin
+  // inside gateway. Same pattern as the tasks proxy: resolves tenantId via
+  // the tenant-mapping cache and forwards to /internal/deep-lattice/*. No
+  // list/discovery or briefing-read endpoints — agents reach knowledge by
+  // directive-supplied filename, and CRO is write-only for briefings.
+  app.use("/api/deep-lattice", createDeepLatticeRouter());
 
   /**
    * POST /api/devices/approve

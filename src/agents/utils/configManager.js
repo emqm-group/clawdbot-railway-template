@@ -520,6 +520,81 @@ class ConfigManager {
   }
 
   /**
+   * Write the deep-lattice-tools plugin config block into openclaw.json.
+   * Mirrors ensureKingsCrossToolsPlugin — idempotent direct config write.
+   * Serialised via mutex to prevent concurrent read-modify-write races.
+   * @param {string} pluginPath - Absolute path to the plugin directory
+   */
+  ensureDeepLatticeToolsPlugin(pluginPath) {
+    return this._mutex.acquire(() => {
+      const config = this.readConfig();
+
+      const pluginsSection = config.plugins ?? {};
+
+      const currentAllow = pluginsSection.allow ?? [];
+      const allow = currentAllow.includes("deep-lattice-tools")
+        ? currentAllow
+        : [...currentAllow, "deep-lattice-tools"];
+
+      const currentPaths = pluginsSection.load?.paths ?? [];
+      const paths = currentPaths.includes(pluginPath)
+        ? currentPaths
+        : [...currentPaths, pluginPath];
+
+      const entries = {
+        ...(pluginsSection.entries ?? {}),
+        "deep-lattice-tools": {
+          ...(pluginsSection.entries?.["deep-lattice-tools"] ?? {}),
+          enabled: true,
+        },
+      };
+
+      const existingInstall = pluginsSection.installs?.["deep-lattice-tools"] ?? {};
+      const installs = {
+        ...(pluginsSection.installs ?? {}),
+        "deep-lattice-tools": {
+          source: "path",
+          sourcePath: pluginPath,
+          installPath: pluginPath,
+          version: "1.0.0",
+          installedAt: existingInstall.installedAt ?? new Date().toISOString(),
+        },
+      };
+
+      const updated = {
+        ...config,
+        plugins: {
+          ...pluginsSection,
+          allow,
+          load: { ...(pluginsSection.load ?? {}), paths },
+          entries,
+          installs,
+        },
+      };
+
+      this.writeConfig(updated);
+      logger.info("ConfigManager: ensured deep-lattice-tools plugin config", { pluginPath });
+    });
+  }
+
+  /**
+   * Add the Deep Lattice tool names to the global tools.alsoAllow list so
+   * agents can invoke them. Per-agent gating is enforced at the orchestrator's
+   * assertCanPerform layer in v1; we may layer per-agent allowlists later.
+   * Idempotent — skips names already present.
+   * Serialised via mutex to prevent concurrent read-modify-write races.
+   */
+  ensureDeepLatticeToolsAlsoAllow() {
+    const DL_TOOLS = [
+      "read_profile_file",
+      "read_knowledge_file",
+      "update_profile_file",
+      "create_briefing",
+    ];
+    return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
+  }
+
+  /**
    * Add a binding to route messages to an agent.
    * Serialised via mutex to prevent concurrent read-modify-write races.
    * @param {string} agentId - Agent ID
