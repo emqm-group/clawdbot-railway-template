@@ -1,7 +1,11 @@
 // Deep Lattice Tools plugin.
-// Registers 7 tools that expose Deep Lattice file access to agents:
-//   read_profile_file, read_knowledge_file, list_knowledge_files,
-//   update_profile_file (MM), create_briefing, list_briefings, read_briefing (CRO).
+// Registers 4 tools that expose Deep Lattice file access to agents:
+//   read_profile_file, read_knowledge_file, update_profile_file (MM),
+//   create_briefing (CRO).
+//
+// No list/discovery or briefing-read tools — agent directives reference
+// specific profile slugs and knowledge filenames by name, and CRO is
+// write-only for briefings (founder consumes them in the tenant UI).
 //
 // Each handler posts to the wrapper's /api/deep-lattice/* loopback router,
 // which resolves tenantId from the calling agent's ID and forwards to the
@@ -12,7 +16,7 @@
 // ID as a tool parameter — the wrapper sources it from ctx and the orchestrator
 // enforces who is allowed to call which tool via assertCanPerform.
 //
-// v1 tool exposure: all 7 tools are added to the global tools.alsoAllow list,
+// v1 tool exposure: all 4 tools are added to the global tools.alsoAllow list,
 // so every agent sees them. Per-agent allowlists can be layered later.
 
 const WRAPPER_PORT = process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000";
@@ -120,33 +124,6 @@ export default function register(api) {
     },
   }));
 
-  // list_knowledge_files — enumerate the tenant's live knowledge files.
-  // Used when a directive needs to discover what is available rather than
-  // referencing a specific filename.
-  api.registerTool((ctx) => ({
-    name: "list_knowledge_files",
-    description:
-      "List all of the tenant's live Knowledge files. Returns { items: [{ filename, title }, ...] }. Most directives reference specific filenames directly; use this only when discovery is needed.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-    },
-    async execute() {
-      const agentId = ctx.agentId;
-      log("list_knowledge_files", "called", { agentId });
-      try {
-        const qs = `?agentId=${encodeURIComponent(agentId)}`;
-        const data = await callWrapper("GET", `/knowledge${qs}`);
-        log("list_knowledge_files", "success", { agentId, count: data?.items?.length ?? 0 });
-        return okResult(data);
-      } catch (err) {
-        logError("list_knowledge_files", err.message, { agentId });
-        return errorResult(err.message);
-      }
-    },
-  }));
-
   // update_profile_file — Memory Manager updates a profile slug's content.
   // Orchestrator's assertCanPerform rejects non-MM callers with 403.
   api.registerTool((ctx) => ({
@@ -237,83 +214,6 @@ export default function register(api) {
         return okResult(data);
       } catch (err) {
         logError("create_briefing", err.message, { agentId, kind });
-        return errorResult(err.message);
-      }
-    },
-  }));
-
-  // list_briefings — CRO lists briefings.
-  // Pagination is handled inside the wrapper router (auto-paginates across
-  // orchestrator pages up to a hard cap). The tool surface exposes only
-  // filter inputs — cursor is intentionally hidden from the LLM.
-  // for_date accepts an ISO date or the literal 'today' (orchestrator resolves
-  // 'today' against tenants.timezone).
-  api.registerTool((ctx) => ({
-    name: "list_briefings",
-    description:
-      "List Founder Briefings. CRO only — other agents receive 403. Pagination is handled by the wrapper; results may be capped at a hard limit, in which case truncated=true is set. for_date accepts an ISO date YYYY-MM-DD or the literal 'today' (resolved server-side via the tenant's timezone). Filter by kind to narrow further.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        for_date: {
-          type: "string",
-          description: "Either an ISO date 'YYYY-MM-DD' or the literal 'today'. Optional.",
-        },
-        kind: {
-          type: "string",
-          enum: ["daily", "weekly", "deal_escalation", "meeting_demo"],
-          description: "Optional. Restrict to one briefing kind.",
-        },
-      },
-    },
-    async execute(_toolCallId, { for_date, kind } = {}) {
-      const agentId = ctx.agentId;
-      log("list_briefings", "called", { agentId, for_date: for_date ?? null, kind: kind ?? null });
-      try {
-        const params = new URLSearchParams({ agentId });
-        if (for_date) params.set("for_date", for_date);
-        if (kind) params.set("kind", kind);
-        const data = await callWrapper("GET", `/briefings?${params.toString()}`);
-        log("list_briefings", "success", {
-          agentId,
-          count: data?.items?.length ?? 0,
-          truncated: Boolean(data?.truncated),
-        });
-        return okResult(data);
-      } catch (err) {
-        logError("list_briefings", err.message, { agentId });
-        return errorResult(err.message);
-      }
-    },
-  }));
-
-  // read_briefing — CRO reads one briefing's row + content.
-  api.registerTool((ctx) => ({
-    name: "read_briefing",
-    description:
-      "Read a single Founder Briefing by UUID. CRO only — other agents receive 403. Returns row metadata + full markdown content. Discover briefing IDs via list_briefings.",
-    parameters: {
-      type: "object",
-      required: ["id"],
-      additionalProperties: false,
-      properties: {
-        id: {
-          type: "string",
-          description: "UUID of the briefing row.",
-        },
-      },
-    },
-    async execute(_toolCallId, { id }) {
-      const agentId = ctx.agentId;
-      log("read_briefing", "called", { agentId, briefingId: id });
-      try {
-        const qs = `?agentId=${encodeURIComponent(agentId)}`;
-        const data = await callWrapper("GET", `/briefings/${encodeURIComponent(id)}${qs}`);
-        log("read_briefing", "success", { agentId, briefingId: id, contentLength: data?.content?.length ?? 0 });
-        return okResult(data);
-      } catch (err) {
-        logError("read_briefing", err.message, { agentId, briefingId: id });
         return errorResult(err.message);
       }
     },

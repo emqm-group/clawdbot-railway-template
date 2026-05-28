@@ -588,11 +588,8 @@ class ConfigManager {
     const DL_TOOLS = [
       "read_profile_file",
       "read_knowledge_file",
-      "list_knowledge_files",
       "update_profile_file",
       "create_briefing",
-      "list_briefings",
-      "read_briefing",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }

@@ -13,9 +13,10 @@
  * via findShardForAgent. The wrapper additionally passes tenantId so the
  * orchestrator can short-circuit the lookup when convenient.
  *
- * Pagination: GET /briefings auto-paginates across orchestrator pages up to
- * MAX_BRIEFINGS_ROWS, hiding the opaque cursor from the LLM. If the cap is
- * hit, truncated=true is set in the response.
+ * No list/discovery or briefing-read endpoints — agents reach knowledge files
+ * by directive-supplied filename, and CRO is write-only for briefings (founder
+ * consumes them in the tenant UI). The orchestrator's list/read endpoints
+ * exist for the admin and founder UIs only.
  *
  * No JWT/Bearer auth on the loopback surface: only reachable from 127.0.0.1
  * (same host); the requireLoopback guard enforces this via
@@ -25,21 +26,6 @@
 import express from "express";
 import logger from "../agents/utils/logger.js";
 import { getTenantId } from "../agents/utils/tenantMappings.js";
-
-// Hard cap on rows returned by list_briefings. With briefings growing daily/
-// weekly, an unbounded list would balloon the LLM context. 200 covers ~6 months
-// of daily briefings and ~4 years of weekly — well past any practical CRO
-// reasoning window. truncated=true signals the cap was hit.
-const MAX_BRIEFINGS_ROWS = 200;
-// Orchestrator-side max per page (per design §6.5). We always request the max
-// to minimize round-trips.
-const ORCH_PAGE_LIMIT = 100;
-// Safety cap on the auto-pagination loop. Under normal conditions
-// ceil(MAX_BRIEFINGS_ROWS / ORCH_PAGE_LIMIT) = 2 pages, occasionally 3 if
-// upstream returns short pages. 10 is generous slack while still preventing an
-// unbounded loop if the orchestrator ever returns 0 items with a non-null
-// cursor (post-cursor soft-delete race, bug, etc).
-const MAX_BRIEFINGS_PAGES = 10;
 
 function log(msg, meta) {
   logger.info(`[DL] ${msg}`, meta);
@@ -141,11 +127,10 @@ export function createDeepLatticeRouter() {
     return { agentId, tenantId };
   }
 
-  // Generic forward — for endpoints that map 1:1 to a single orchestrator call.
-  // POST/PUT/PATCH bodies are extended with tenantId + agent_id.
-  // GET queries become tenantId + agent_id only (none of the current GET
-  // forwards take additional query params; list_briefings handles its own
-  // filters in its dedicated handler).
+  // Generic forward — for endpoints that map 1:1 to a single orchestrator
+  // call. POST/PUT/PATCH bodies are extended with tenantId + agent_id; GET
+  // queries become tenantId + agent_id only (no current route forwards
+  // additional query params).
   async function forward(req, res, orchestratorPath) {
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
@@ -247,12 +232,6 @@ export function createDeepLatticeRouter() {
     return forward(req, res, `/profile/${encodeURIComponent(req.params.slug)}/content`);
   });
 
-  // GET /api/deep-lattice/knowledge
-  // → GET /internal/deep-lattice/knowledge?tenantId=&agent_id=
-  router.get("/knowledge", (req, res) => {
-    return forward(req, res, "/knowledge");
-  });
-
   // GET /api/deep-lattice/knowledge/:filename
   // → GET /internal/deep-lattice/knowledge/:filename?tenantId=&agent_id=
   router.get("/knowledge/:filename", (req, res) => {
@@ -263,112 +242,6 @@ export function createDeepLatticeRouter() {
   // → POST /internal/deep-lattice/briefings (CRO creates a briefing)
   router.post("/briefings", (req, res) => {
     return forward(req, res, "/briefings");
-  });
-
-  // GET /api/deep-lattice/briefings — auto-paginate.
-  // Loops over orchestrator pages following next_cursor until exhausted or
-  // MAX_BRIEFINGS_ROWS rows are accumulated. Cursor is never exposed upstream
-  // to the LLM. Returns { items, truncated } — truncated=true if we hit the
-  // hard cap and stopped fetching further pages.
-  router.get("/briefings", async (req, res) => {
-    const baseUrl = ORCHESTRATOR_URL();
-    const secret = ORCHESTRATOR_SECRET();
-    if (!baseUrl || !secret) return missingConfig(res);
-
-    const resolved = await resolveTenant(req, res);
-    if (!resolved) return;
-    const { agentId, tenantId } = resolved;
-
-    const for_date = typeof req.query.for_date === "string" ? req.query.for_date : null;
-    const kind = typeof req.query.kind === "string" ? req.query.kind : null;
-
-    const headers = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${secret}`,
-    };
-
-    const allItems = [];
-    let cursor = null;
-    let truncated = false;
-    let pageCount = 0;
-    const startedAt = Date.now();
-
-    while (true) {
-      const qs = new URLSearchParams({
-        tenantId,
-        agent_id: agentId,
-        limit: String(ORCH_PAGE_LIMIT),
-      });
-      if (for_date) qs.set("for_date", for_date);
-      if (kind) qs.set("kind", kind);
-      if (cursor) qs.set("cursor", cursor);
-
-      const url = `${baseUrl}/internal/deep-lattice/briefings?${qs.toString()}`;
-      log(`briefings page ${pageCount + 1} → GET ${url}`, { tenantId, agentId });
-
-      let resp;
-      try {
-        resp = await fetch(url, { method: "GET", headers });
-      } catch (err) {
-        logError("briefings fetch failed", {
-          url,
-          error: err.message,
-          cause: err.cause?.message ?? null,
-        });
-        return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
-      }
-
-      if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({}));
-        logError("briefings non-2xx response", {
-          url,
-          status: resp.status,
-          bodyPreview: previewBody(errBody),
-        });
-        // Surface the orchestrator error verbatim — same status, same body.
-        return res.status(resp.status).json(errBody);
-      }
-
-      const data = await resp.json().catch(() => ({}));
-      const items = Array.isArray(data?.items) ? data.items : [];
-      pageCount += 1;
-
-      const remaining = MAX_BRIEFINGS_ROWS - allItems.length;
-      if (items.length >= remaining) {
-        allItems.push(...items.slice(0, remaining));
-        if (items.length > remaining || data?.next_cursor) {
-          truncated = true;
-        }
-        break;
-      }
-      allItems.push(...items);
-
-      cursor = data?.next_cursor ?? null;
-      if (!cursor) break;
-
-      if (pageCount >= MAX_BRIEFINGS_PAGES) {
-        log("briefings page cap reached", { tenantId, agentId, pageCount, itemCount: allItems.length });
-        truncated = true;
-        break;
-      }
-    }
-
-    log(`briefings auto-paginated`, {
-      tenantId,
-      agentId,
-      pageCount,
-      itemCount: allItems.length,
-      truncated,
-      durationMs: Date.now() - startedAt,
-    });
-
-    return res.status(200).json({ items: allItems, truncated });
-  });
-
-  // GET /api/deep-lattice/briefings/:briefingId
-  // → GET /internal/deep-lattice/briefings/:briefingId?tenantId=&agent_id=
-  router.get("/briefings/:briefingId", (req, res) => {
-    return forward(req, res, `/briefings/${encodeURIComponent(req.params.briefingId)}`);
   });
 
   return router;

@@ -46,10 +46,10 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
   app.use("/api/tasks", createTasksRouter());
 
   // Deep Lattice proxy — loopback-only, called by deep-lattice-tools plugin
-  // inside gateway. Same pattern as the tasks proxy: resolves tenantId via the
-  // tenant-mapping cache and forwards to /internal/deep-lattice/*. The
-  // list_briefings handler auto-paginates across orchestrator pages so the
-  // LLM never sees the opaque cursor.
+  // inside gateway. Same pattern as the tasks proxy: resolves tenantId via
+  // the tenant-mapping cache and forwards to /internal/deep-lattice/*. No
+  // list/discovery or briefing-read endpoints — agents reach knowledge by
+  // directive-supplied filename, and CRO is write-only for briefings.
   app.use("/api/deep-lattice", createDeepLatticeRouter());
 
   /**
