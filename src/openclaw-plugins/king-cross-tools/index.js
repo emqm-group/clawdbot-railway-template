@@ -66,15 +66,13 @@ export default function register(api) {
         const t = data.task;
         const projected = {
           id: t.id,
-          task_name: t.task_name ?? null,
-          task_type_name: t.task_type_name ?? null,
           task_description: t.task_description,
         };
         if (t.directive_filename) {
           const skillName = t.directive_filename.replace(/\.md$/i, "");
           projected.skill_path = `/data/.openclaw/workspace-${agentId}/skills/${skillName}/SKILL.md`;
         }
-        log("kc_get_next_task", "task found", { agentId, taskId: t.id, task_name: projected.task_name, task_type_name: projected.task_type_name, skill_path: projected.skill_path ?? null });
+        log("kc_get_next_task", "task found", { agentId, taskId: t.id, skill_path: projected.skill_path ?? null });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };
       } catch (err) {
         logError("kc_get_next_task", err.message, { agentId });
@@ -116,10 +114,7 @@ export default function register(api) {
         }
         const projected = {
           id: t.id,
-          task_name: t.task_name ?? null,
-          task_type_name: t.task_type_name ?? null,
           task_description: t.task_description,
-          execution_status: t.execution_status,
           approval_status: t.approval_status,
           user_notes: t.user_notes ?? null,
           agent_notes: t.agent_notes ?? null,
@@ -134,10 +129,8 @@ export default function register(api) {
         }
         log("kc_get_task", "success", {
           taskId,
-          execution_status: projected.execution_status,
+          approval_status: projected.approval_status,
           artifactCount: projected.artifacts.length,
-          task_name: projected.task_name,
-          task_type_name: projected.task_type_name,
           skill_path: projected.skill_path ?? null,
         });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };

@@ -8,6 +8,22 @@ import logger from "./logger.js";
 
 const execAsync = promisify(exec);
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Match gateway-down / mid-restart errors. The CLI surfaces these in stderr
+// (or sometimes stdout) as:
+//   - "ECONNREFUSED"            — port not yet bound
+//   - "gateway closed (1006 ...)" / "abnormal closure" / "no close frame"
+//     — WS dropped (gateway exiting) or attached too late
+//   - "UNAVAILABLE"             — gateway RPC error code for not-ready
+const TRANSIENT_GATEWAY_ERROR_RE =
+  /econnrefused|gateway closed|abnormal closure|no close frame|unavailable|connection refused|socket hang up/i;
+
+function isTransientGatewayError(err) {
+  const blob = `${err?.stderr || ""}\n${err?.stdout || ""}\n${err?.message || ""}`;
+  return TRANSIENT_GATEWAY_ERROR_RE.test(blob);
+}
+
 /**
  * OpenClaw Service
  * Wrapper around OpenClaw CLI commands with comprehensive logging
@@ -272,11 +288,21 @@ class OpenClawService {
    * @returns {Promise<{ success: boolean, results: object[] }>}
    */
   async resetAgentSession(agentId, sessionKey) {
-    // Wait for the gateway to actually be listening on its port. Without
-    // this, a reset arriving mid-restart (e.g. orchestrator chains
-    // directive push → reset) hits a closed WS and fails.
+    // Make sure a gateway process exists (or is being spawned). The HTTP
+    // readiness probe inside ensureGatewayResponsive lies — it returns true
+    // when the gateway's HTTP server is up but WS handlers aren't attached
+    // yet (gateway startup attaches WS handlers last) — so we don't trust
+    // it for "ready". The real readiness check is the retry loop in
+    // _execGatewayCallWithRetry, which probes the actual RPC.
     if (this._ensureGatewayResponsive) {
-      await this._ensureGatewayResponsive();
+      try {
+        await this._ensureGatewayResponsive();
+      } catch (err) {
+        logger.warn("resetAgentSession: gateway probe failed, will retry RPC", {
+          agentId,
+          error: err.message,
+        });
+      }
     }
 
     // If a specific session key is provided, reset just that one
@@ -287,12 +313,9 @@ class OpenClawService {
     // Otherwise list all sessions and reset any belonging to this agent.
     // sessions.list failure must propagate — silently treating it as "no
     // sessions" would make the reset a silent no-op while reporting success.
-    const command = `openclaw gateway call sessions.list --json`;
-    logger.command(command);
     let parsed;
     try {
-      const { stdout } = await execAsync(command);
-      parsed = JSON.parse(stdout);
+      parsed = await this._execGatewayCallWithRetry("sessions.list", null, { agentId });
     } catch (err) {
       const details = (err.stderr || err.stdout || err.message || "").trim();
       logger.error("resetAgentSession: sessions.list failed", { agentId, details });
@@ -320,14 +343,47 @@ class OpenClawService {
     return { success: true, results };
   }
 
+  /**
+   * Run `openclaw gateway call <method>` with retries on transient
+   * gateway-down errors (mid-restart). Returns parsed JSON on success.
+   *
+   * Total wait budget: maxAttempts × delayMs (default 20 × 500ms = 10s),
+   * which comfortably covers the ~1-2s gateway restart window we observe.
+   */
+  async _execGatewayCallWithRetry(method, params, ctx = {}, opts = {}) {
+    const { maxAttempts = 20, delayMs = 500 } = opts;
+    const paramsArg = params ? ` --params '${JSON.stringify(params)}'` : "";
+    const command = `openclaw gateway call ${method} --json${paramsArg}`;
+
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (attempt === 1) logger.command(command, ctx);
+        const { stdout } = await execAsync(command);
+        if (attempt > 1) {
+          logger.info(`${method}: succeeded after retry`, { ...ctx, attempts: attempt });
+        }
+        return JSON.parse(stdout);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientGatewayError(err)) throw err;
+        if (attempt < maxAttempts) {
+          await sleep(delayMs);
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   async _resetSessionByKey(agentId, sessionKey) {
     try {
-      const payload = JSON.stringify({ key: sessionKey, reason: "reset" });
-      const command = `openclaw gateway call sessions.reset --json --params '${payload}'`;
-      logger.command(command, { agentId, sessionKey });
-      const { stdout } = await execAsync(command);
+      const result = await this._execGatewayCallWithRetry(
+        "sessions.reset",
+        { key: sessionKey, reason: "reset" },
+        { agentId, sessionKey },
+      );
       logger.info("resetAgentSession: session reset via gateway RPC", { agentId, sessionKey });
-      return { success: true, output: stdout.trim() };
+      return { success: true, output: JSON.stringify(result) };
     } catch (err) {
       const details = (err.stderr || err.stdout || err.message || "").trim();
       logger.error("resetAgentSession: gateway RPC failed", { agentId, sessionKey, details });
