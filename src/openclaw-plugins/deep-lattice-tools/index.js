@@ -16,8 +16,9 @@
 // ID as a tool parameter — the wrapper sources it from ctx and the orchestrator
 // enforces who is allowed to call which tool via assertCanPerform.
 //
-// v1 tool exposure: all 4 tools are added to the global tools.alsoAllow list,
-// so every agent sees them. Per-agent allowlists can be layered later.
+// Tool exposure: all 4 tools are added to the global tools.alsoAllow list so
+// they are eligible. Per-agent `tools.allow` is the actual gate — an agent
+// only sees a DL tool if it is listed in that agent's allowlist.
 
 const WRAPPER_PORT = process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000";
 const BASE_URL = `http://127.0.0.1:${WRAPPER_PORT}/api/deep-lattice`;
@@ -64,7 +65,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_profile_file",
     description:
-      "Read one of the tenant's 5 Profile files by slug. Returns row metadata + full markdown content in one call. Slugs: company-founder, products, market-competitors, pricing, icp.",
+      "Read one of the tenant's 5 Profile files by slug. Returns the full markdown content. Slugs: company-founder, products, market-competitors, pricing, icp.",
     parameters: {
       type: "object",
       required: ["slug"],
@@ -73,7 +74,6 @@ export default function register(api) {
         slug: {
           type: "string",
           enum: ["company-founder", "products", "market-competitors", "pricing", "icp"],
-          description: "One of the 5 fixed Profile slugs.",
         },
       },
     },
@@ -84,7 +84,7 @@ export default function register(api) {
         const qs = `?agentId=${encodeURIComponent(agentId)}`;
         const data = await callWrapper("GET", `/profile/${encodeURIComponent(slug)}${qs}`);
         log("read_profile_file", "success", { agentId, slug, contentLength: data?.content?.length ?? 0 });
-        return okResult(data);
+        return okResult({ content: data?.content ?? "" });
       } catch (err) {
         logError("read_profile_file", err.message, { agentId, slug });
         return errorResult(err.message);
@@ -92,12 +92,12 @@ export default function register(api) {
     },
   }));
 
-  // read_knowledge_file — any agent reads a specific knowledge file by filename.
-  // Filename must match what the founder uploaded (lowercase per validator).
+  // read_knowledge_file — any agent reads one of the 3 reserved structured
+  // knowledge files (see orchestrator src/constants/deepLattice.js → KNOWLEDGE_SLUGS).
   api.registerTool((ctx) => ({
     name: "read_knowledge_file",
     description:
-      "Read one of the tenant's Knowledge files by filename. Returns row metadata + full markdown content. Filename includes the .md extension (e.g. 'differentiators.md') and is normalised to lowercase server-side.",
+      "Read one of the tenant's Knowledge files by filename. Returns the full markdown content. Filenames: example-emails.md, example-blog-posts.md, example-linkedin-posts.md.",
     parameters: {
       type: "object",
       required: ["filename"],
@@ -105,7 +105,7 @@ export default function register(api) {
       properties: {
         filename: {
           type: "string",
-          description: "Filename with .md extension as stored by the founder.",
+          enum: ["example-emails.md", "example-blog-posts.md", "example-linkedin-posts.md"],
         },
       },
     },
@@ -116,7 +116,7 @@ export default function register(api) {
         const qs = `?agentId=${encodeURIComponent(agentId)}`;
         const data = await callWrapper("GET", `/knowledge/${encodeURIComponent(filename)}${qs}`);
         log("read_knowledge_file", "success", { agentId, filename, contentLength: data?.content?.length ?? 0 });
-        return okResult(data);
+        return okResult({ content: data?.content ?? "" });
       } catch (err) {
         logError("read_knowledge_file", err.message, { agentId, filename });
         return errorResult(err.message);
@@ -129,7 +129,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "update_profile_file",
     description:
-      "Replace the full markdown content of one Profile slug. Memory Manager only — other agents receive 403. The supplied content replaces the existing file entirely.",
+      "Replace the full markdown content of one Profile slug. The supplied content replaces the existing file entirely.",
     parameters: {
       type: "object",
       required: ["slug", "content"],
@@ -138,11 +138,10 @@ export default function register(api) {
         slug: {
           type: "string",
           enum: ["company-founder", "products", "market-competitors", "pricing", "icp"],
-          description: "One of the 5 fixed Profile slugs.",
         },
         content: {
           type: "string",
-          description: "Full new markdown content for the slug. Replaces existing content.",
+          description: "Full new markdown content for the slug.",
         },
       },
     },
@@ -150,13 +149,13 @@ export default function register(api) {
       const agentId = ctx.agentId;
       log("update_profile_file", "called", { agentId, slug, contentLength: content?.length ?? 0 });
       try {
-        const data = await callWrapper(
+        await callWrapper(
           "PUT",
           `/profile/${encodeURIComponent(slug)}/content`,
           { agentId, content }
         );
         log("update_profile_file", "success", { agentId, slug });
-        return okResult(data);
+        return okResult({ ok: true });
       } catch (err) {
         logError("update_profile_file", err.message, { agentId, slug });
         return errorResult(err.message);
@@ -166,14 +165,12 @@ export default function register(api) {
 
   // create_briefing — CRO creates a founder briefing.
   // Orchestrator's assertCanPerform rejects non-CRO callers with 403.
-  // brief_for_date is optional — the orchestrator defaults to "today" in the
-  // tenant's timezone when omitted, and resolves the literal "today" the same
-  // way. display_time is NOT a tool input: the orchestrator computes it from
-  // the briefing's created_at in tenant tz (per Deep Lattice v1 §8.2).
+  // brief_for_date and display_time are server-stamped (today in tenant tz);
+  // neither is an agent-facing parameter.
   api.registerTool((ctx) => ({
     name: "create_briefing",
     description:
-      "Create a Founder Briefing. CRO only — other agents receive 403. Kind is one of daily | weekly | deal_escalation | meeting_demo. brief_for_date is optional; pass an ISO date YYYY-MM-DD (tenant-local) or the literal 'today', or omit to default to today in the tenant's timezone. display_time is computed server-side from the briefing's creation time in the tenant timezone — do NOT pass it. summary is the one-line list-view preview; content is the full markdown body.",
+      "Create a Founder Briefing. Kind is one of daily | weekly | deal_escalation | meeting_demo. summary is the one-line list-view preview; content is the full markdown body.",
     parameters: {
       type: "object",
       required: ["kind", "title", "summary", "content"],
@@ -183,11 +180,9 @@ export default function register(api) {
           type: "string",
           enum: ["daily", "weekly", "deal_escalation", "meeting_demo"],
         },
-        title: { type: "string" },
-        brief_for_date: {
+        title: {
           type: "string",
-          description:
-            "Optional. ISO date 'YYYY-MM-DD' in tenant-local terms, or the literal 'today'. Omit to default to today in the tenant's timezone.",
+          description: "Headline shown in the list view.",
         },
         summary: {
           type: "string",
@@ -199,19 +194,14 @@ export default function register(api) {
         },
       },
     },
-    async execute(_toolCallId, { kind, title, brief_for_date, summary, content }) {
+    async execute(_toolCallId, { kind, title, summary, content }) {
       const agentId = ctx.agentId;
-      log("create_briefing", "called", { agentId, kind, brief_for_date: brief_for_date || null });
+      log("create_briefing", "called", { agentId, kind });
       try {
         const body = { agentId, kind, title, summary, content };
-        // Drop falsy brief_for_date (undefined OR empty string) so the
-        // orchestrator's "today in tenant tz" default kicks in. The validator
-        // rejects "" with 400 — an empty string from the LLM is almost
-        // certainly intent-to-default rather than intent-to-fail.
-        if (brief_for_date) body.brief_for_date = brief_for_date;
         const data = await callWrapper("POST", "/briefings", body);
         log("create_briefing", "success", { agentId, kind, briefingId: data?.id });
-        return okResult(data);
+        return okResult({ ok: true });
       } catch (err) {
         logError("create_briefing", err.message, { agentId, kind });
         return errorResult(err.message);
