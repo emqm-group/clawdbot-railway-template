@@ -115,7 +115,6 @@ export default function register(api) {
         const projected = {
           id: t.id,
           task_description: t.task_description,
-          approval_status: t.approval_status,
           user_notes: t.user_notes ?? null,
           agent_notes: t.agent_notes ?? null,
           artifacts: (t.artifacts ?? []).map((a) => ({
@@ -129,7 +128,6 @@ export default function register(api) {
         }
         log("kc_get_task", "success", {
           taskId,
-          approval_status: projected.approval_status,
           artifactCount: projected.artifacts.length,
           skill_path: projected.skill_path ?? null,
         });
@@ -155,9 +153,6 @@ export default function register(api) {
     name: "kc_update_task",
     description:
       "Update your task's execution_status and/or agent_notes. You must be the assigned agent. " +
-      "Valid status transitions: scheduled→processing, processing→awaiting_approval (only when approval_status=required or modify), processing→completed, processing→failed, received_approval→processing. " +
-      "After completed or failed: call kc_get_next_task immediately to continue your loop — KC does not send another notification. " +
-      "After awaiting_approval: stop your loop — KC will re-trigger you via tasks_available (for remaining scheduled tasks) or approval_actioned (when the user acts). " +
       "Provide at least one of execution_status or agent_notes.",
     parameters: {
       type: "object",
@@ -194,12 +189,8 @@ export default function register(api) {
         if (agent_notes !== undefined) body.agent_notes = agent_notes;
         const data = await callWrapper("PATCH", `/${encodeURIComponent(taskId)}`, body);
         const t = data.task ?? {};
-        const projected = {
-          id: t.id,
-          execution_status: t.execution_status,
-          approval_status: t.approval_status,
-        };
-        log("kc_update_task", "success", { agentId, taskId, execution_status: projected.execution_status, approval_status: projected.approval_status });
+        const projected = { id: t.id };
+        log("kc_update_task", "success", { agentId, taskId, execution_status: t.execution_status, approval_status: t.approval_status });
         return { content: [{ type: "text", text: JSON.stringify({ task: projected }) }] };
       } catch (err) {
         logError("kc_update_task", err.message, { agentId, taskId, execution_status: execution_status ?? null });
