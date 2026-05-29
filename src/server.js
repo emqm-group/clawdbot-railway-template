@@ -23,6 +23,7 @@ import {
 } from "./agents/utils/tenantMappings.js";
 import logger from "./agents/utils/logger.js";
 import configManager from "./agents/utils/configManager.js";
+import openclawService from "./agents/utils/openclawService.js";
 
 const internalRouter = createInternalRouter();
 
@@ -306,6 +307,20 @@ async function restartGateway() {
   }
   return ensureGatewayRunning();
 }
+
+// ensureGatewayRunning returns immediately when gatewayProc is set, even if
+// the process was just SIGTERM'd and isn't accepting connections yet. Callers
+// about to talk to the gateway need a real port-level probe, not just the
+// in-process flag.
+async function ensureGatewayResponsive() {
+  await ensureGatewayRunning();
+  const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
+  if (!ready) {
+    throw new Error("Gateway did not become responsive in time");
+  }
+}
+
+openclawService.setGatewayReadinessProbe(ensureGatewayResponsive);
 
 function requireSetupAuth(req, res, next) {
   if (!SETUP_PASSWORD) {

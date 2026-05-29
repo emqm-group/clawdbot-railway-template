@@ -13,6 +13,17 @@ const execAsync = promisify(exec);
  * Wrapper around OpenClaw CLI commands with comprehensive logging
  */
 class OpenClawService {
+  constructor() {
+    // Optional probe injected by server.js. When set, methods that hit the
+    // gateway over WS (sessions.list, sessions.reset, ...) await it first so
+    // they don't race a SIGTERM'd-but-not-yet-respawned gateway.
+    this._ensureGatewayResponsive = null;
+  }
+
+  setGatewayReadinessProbe(fn) {
+    this._ensureGatewayResponsive = fn;
+  }
+
   /**
    * Create a new agent
    * @param {string} agentId - Unique agent identifier
@@ -261,25 +272,37 @@ class OpenClawService {
    * @returns {Promise<{ success: boolean, results: object[] }>}
    */
   async resetAgentSession(agentId, sessionKey) {
+    // Wait for the gateway to actually be listening on its port. Without
+    // this, a reset arriving mid-restart (e.g. orchestrator chains
+    // directive push → reset) hits a closed WS and fails.
+    if (this._ensureGatewayResponsive) {
+      await this._ensureGatewayResponsive();
+    }
+
     // If a specific session key is provided, reset just that one
     if (sessionKey) {
       return this._resetSessionByKey(agentId, sessionKey);
     }
 
-    // Otherwise list all sessions and reset any belonging to this agent
-    let sessions = [];
+    // Otherwise list all sessions and reset any belonging to this agent.
+    // sessions.list failure must propagate — silently treating it as "no
+    // sessions" would make the reset a silent no-op while reporting success.
+    const command = `openclaw gateway call sessions.list --json`;
+    logger.command(command);
+    let parsed;
     try {
-      const command = `openclaw gateway call sessions.list --json`;
-      logger.command(command);
       const { stdout } = await execAsync(command);
-      const parsed = JSON.parse(stdout);
-      // Response may be { sessions: [...] } or a bare array
-      const all = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
-      // Session keys follow the format "agent:<agentId>:<scope>"
-      sessions = all.filter((s) => s.key?.startsWith(`agent:${agentId}:`));
+      parsed = JSON.parse(stdout);
     } catch (err) {
-      logger.warn("resetAgentSession: could not list sessions", { error: err.message });
+      const details = (err.stderr || err.stdout || err.message || "").trim();
+      logger.error("resetAgentSession: sessions.list failed", { agentId, details });
+      throw new Error(`could not list sessions: ${details}`);
     }
+
+    // Response may be { sessions: [...] } or a bare array.
+    // Session keys follow the format "agent:<agentId>:<scope>".
+    const all = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
+    const sessions = all.filter((s) => s.key?.startsWith(`agent:${agentId}:`));
 
     if (sessions.length === 0) {
       logger.info("resetAgentSession: no active sessions found for agent", { agentId });
