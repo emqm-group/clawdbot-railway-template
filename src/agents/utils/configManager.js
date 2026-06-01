@@ -601,6 +601,8 @@ class ConfigManager {
       "read_latest_daily_target",
       "create_execution_plan",
       "read_latest_execution_plan",
+      // Templates (migration 019) — global, read-only
+      "read_template",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }

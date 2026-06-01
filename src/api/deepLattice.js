@@ -247,6 +247,13 @@ export function createDeepLatticeRouter() {
     return forward(req, res, `/knowledge/${encodeURIComponent(req.params.filename)}`);
   });
 
+  // GET /api/deep-lattice/templates/:filename
+  // → GET /internal/deep-lattice/templates/:filename?tenantId=&agent_id=
+  // Global (not tenant-scoped) admin-authored templates; read-only for agents.
+  router.get("/templates/:filename", (req, res) => {
+    return forward(req, res, `/templates/${encodeURIComponent(req.params.filename)}`);
+  });
+
   // GET /api/deep-lattice/briefings?agentId=&kind=&date=
   // → GET /internal/deep-lattice/briefings?tenantId=&agent_id=&kind=&for_date=
   // Reads back briefings, optionally filtered by kind and/or date.

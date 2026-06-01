@@ -1,7 +1,8 @@
 // Deep Lattice Tools plugin.
-// Registers 13 tools that expose Deep Lattice file access to agents:
+// Registers 14 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file.
+//   Templates (migration 019): read_template (global, read-only).
 //   Briefings: create_briefing, read_briefings.
 //   Agent documents (migration 018): create_analytics_report,
 //     read_analytics_reports, create_plan, read_latest_plan,
@@ -30,7 +31,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 13 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 14 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -137,6 +138,40 @@ export default function register(api) {
         return okResult({ content: data?.content ?? "" });
       } catch (err) {
         logError("read_knowledge_file", err.message, { agentId, filename });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // read_template — read a GLOBAL admin-authored template by filename
+  // (migration 019). Templates are not tenant-scoped — one shared set, read-only
+  // for agents. Filenames are dynamic (admin-authored), so there is no enum;
+  // agent directives reference templates by name, like profile slugs.
+  api.registerTool((ctx) => ({
+    name: "read_template",
+    description:
+      "Read a global template file by filename. Returns the full markdown content.",
+    parameters: {
+      type: "object",
+      required: ["filename"],
+      additionalProperties: false,
+      properties: {
+        filename: {
+          type: "string",
+          description: "The template filename to read (e.g. \"daily-brief.md\").",
+        },
+      },
+    },
+    async execute(_toolCallId, { filename }) {
+      const agentId = ctx.agentId;
+      log("read_template", "called", { agentId, filename });
+      try {
+        const qs = `?agentId=${encodeURIComponent(agentId)}`;
+        const data = await callWrapper("GET", `/templates/${encodeURIComponent(filename)}${qs}`);
+        log("read_template", "success", { agentId, filename, contentLength: data?.content?.length ?? 0 });
+        return okResult({ content: data?.content ?? "" });
+      } catch (err) {
+        logError("read_template", err.message, { agentId, filename });
         return errorResult(err.message);
       }
     },
