@@ -211,15 +211,15 @@ export default function register(api) {
   }));
 
   // read_briefings — CRO reads back the briefings it has published, optionally
-  // filtered by kind and/or date. Both params are optional; with no filters at
-  // all we default to today's briefings (date="today", resolved against tenant
-  // tz orchestrator-side). Orchestrator's assertCanPerform rejects non-CRO
-  // callers with 403. Returns list-view metadata (kind/title/summary/date),
-  // not the full markdown body.
+  // filtered by kind and/or date. Both params are optional; the orchestrator
+  // defaults to today's briefings when neither filter is supplied (an explicit
+  // kind is honoured cross-day). Orchestrator's assertCanPerform rejects non-CRO
+  // callers with 403. Returns kind/title/summary/date plus the full markdown
+  // content of each briefing (fetched from the bucket orchestrator-side).
   api.registerTool((ctx) => ({
     name: "read_briefings",
     description:
-      "Read the Founder Briefings you have published, newest first. Optionally filter by kind (daily | weekly | deal_escalation | meeting_demo) and/or date (\"today\" or an ISO date \"YYYY-MM-DD\"). Both filters are optional; omit both to get today's briefings. Returns each briefing's kind, title, summary, and date (the date string includes the published time) — not the full body.",
+      "Read the Founder Briefings you have published, newest first. Optionally filter by kind (daily | weekly | deal_escalation | meeting_demo) and/or date (\"today\" or an ISO date \"YYYY-MM-DD\"). Both filters are optional; omit both to get today's briefings. Returns each briefing's kind, title, summary, date (the date string includes the published time), and full markdown content.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -238,8 +238,7 @@ export default function register(api) {
     async execute(_toolCallId, args) {
       const agentId = ctx.agentId;
       const kind = args?.kind;
-      // Default to today's briefings when the agent supplies no filters at all.
-      const date = args?.date ?? (kind ? undefined : "today");
+      const date = args?.date;
       log("read_briefings", "called", { agentId, kind, date });
       try {
         const qs = new URLSearchParams({ agentId });
@@ -251,6 +250,7 @@ export default function register(api) {
           title: b.title,
           summary: b.summary,
           date: [b.brief_for_date, b.display_time].filter(Boolean).join(" "),
+          content: b.content,
         }));
         log("read_briefings", "success", { agentId, kind, date, count: items.length });
         return okResult({ items });
