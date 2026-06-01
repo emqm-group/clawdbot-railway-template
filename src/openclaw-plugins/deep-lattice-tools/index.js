@@ -1,12 +1,13 @@
 // Deep Lattice Tools plugin.
 // Registers 5 tools that expose Deep Lattice file access to agents:
 //   read_profile_file, read_knowledge_file, update_profile_file (MM),
-//   create_briefing (CRO), read_briefings (CRO).
+//   create_briefing (Chief of Staff), read_briefings (CRO).
 //
 // No profile/knowledge list/discovery tools — agent directives reference
-// specific profile slugs and knowledge filenames by name. Briefings are the
-// exception: CRO both writes (create_briefing) and reads back (read_briefings,
-// filtered by kind and/or date); the orchestrator gates the read to CRO.
+// specific profile slugs and knowledge filenames by name. Briefings split
+// write/read across agents: Chief of Staff writes (create_briefing) and CRO
+// reads back (read_briefings, filtered by kind and/or date); the orchestrator
+// gates create to Chief of Staff and read to CRO.
 //
 // Each handler posts to the wrapper's /api/deep-lattice/* loopback router,
 // which resolves tenantId from the calling agent's ID and forwards to the
@@ -164,8 +165,8 @@ export default function register(api) {
     },
   }));
 
-  // create_briefing — CRO creates a founder briefing.
-  // Orchestrator's assertCanPerform rejects non-CRO callers with 403.
+  // create_briefing — Chief of Staff creates a founder briefing.
+  // Orchestrator's assertCanPerform rejects non-chief-of-staff callers with 403.
   // brief_for_date and display_time are server-stamped (today in tenant tz);
   // neither is an agent-facing parameter.
   api.registerTool((ctx) => ({
