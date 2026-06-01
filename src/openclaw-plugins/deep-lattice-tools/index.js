@@ -1,11 +1,12 @@
 // Deep Lattice Tools plugin.
-// Registers 4 tools that expose Deep Lattice file access to agents:
+// Registers 5 tools that expose Deep Lattice file access to agents:
 //   read_profile_file, read_knowledge_file, update_profile_file (MM),
-//   create_briefing (CRO).
+//   create_briefing (CRO), read_briefings (CRO).
 //
-// No list/discovery or briefing-read tools — agent directives reference
-// specific profile slugs and knowledge filenames by name, and CRO is
-// write-only for briefings (founder consumes them in the tenant UI).
+// No profile/knowledge list/discovery tools — agent directives reference
+// specific profile slugs and knowledge filenames by name. Briefings are the
+// exception: CRO both writes (create_briefing) and reads back (read_briefings,
+// filtered by kind and/or date); the orchestrator gates the read to CRO.
 //
 // Each handler posts to the wrapper's /api/deep-lattice/* loopback router,
 // which resolves tenantId from the calling agent's ID and forwards to the
@@ -204,6 +205,57 @@ export default function register(api) {
         return okResult({ ok: true });
       } catch (err) {
         logError("create_briefing", err.message, { agentId, kind });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // read_briefings — CRO reads back the briefings it has published, optionally
+  // filtered by kind and/or date. Both params are optional; with no filters at
+  // all we default to today's briefings (date="today", resolved against tenant
+  // tz orchestrator-side). Orchestrator's assertCanPerform rejects non-CRO
+  // callers with 403. Returns list-view metadata (kind/title/summary/date),
+  // not the full markdown body.
+  api.registerTool((ctx) => ({
+    name: "read_briefings",
+    description:
+      "Read the Founder Briefings you have published, newest first. Optionally filter by kind (daily | weekly | deal_escalation | meeting_demo) and/or date (\"today\" or an ISO date \"YYYY-MM-DD\"). Both filters are optional; omit both to get today's briefings. Returns each briefing's kind, title, summary, and date (the date string includes the published time) — not the full body.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["daily", "weekly", "deal_escalation", "meeting_demo"],
+          description: "Filter to briefings of this kind.",
+        },
+        date: {
+          type: "string",
+          description: 'Filter to briefings for this date — "today" or an ISO date "YYYY-MM-DD".',
+        },
+      },
+    },
+    async execute(_toolCallId, args) {
+      const agentId = ctx.agentId;
+      const kind = args?.kind;
+      // Default to today's briefings when the agent supplies no filters at all.
+      const date = args?.date ?? (kind ? undefined : "today");
+      log("read_briefings", "called", { agentId, kind, date });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        if (kind) qs.set("kind", kind);
+        if (date) qs.set("date", date);
+        const data = await callWrapper("GET", `/briefings?${qs.toString()}`);
+        const items = (data?.items ?? []).map((b) => ({
+          kind: b.kind,
+          title: b.title,
+          summary: b.summary,
+          date: [b.brief_for_date, b.display_time].filter(Boolean).join(" "),
+        }));
+        log("read_briefings", "success", { agentId, kind, date, count: items.length });
+        return okResult({ items });
+      } catch (err) {
+        logError("read_briefings", err.message, { agentId, kind, date });
         return errorResult(err.message);
       }
     },

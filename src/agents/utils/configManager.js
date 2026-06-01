@@ -590,6 +590,7 @@ class ConfigManager {
       "read_knowledge_file",
       "update_profile_file",
       "create_briefing",
+      "read_briefings",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }

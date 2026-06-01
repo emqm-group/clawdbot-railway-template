@@ -13,10 +13,10 @@
  * via findShardForAgent. The wrapper additionally passes tenantId so the
  * orchestrator can short-circuit the lookup when convenient.
  *
- * No list/discovery or briefing-read endpoints — agents reach knowledge files
- * by directive-supplied filename, and CRO is write-only for briefings (founder
- * consumes them in the tenant UI). The orchestrator's list/read endpoints
- * exist for the admin and founder UIs only.
+ * No profile/knowledge list/discovery endpoints — agents reach those files by
+ * directive-supplied slug/filename. Briefings are the exception: CRO both
+ * writes them (POST) and reads them back (GET /briefings, filtered by kind
+ * and/or date). The orchestrator gates the read to the CRO agent.
  *
  * No JWT/Bearer auth on the loopback surface: only reachable from 127.0.0.1
  * (same host); the requireLoopback guard enforces this via
@@ -129,9 +129,9 @@ export function createDeepLatticeRouter() {
 
   // Generic forward — for endpoints that map 1:1 to a single orchestrator
   // call. POST/PUT/PATCH bodies are extended with tenantId + agent_id; GET
-  // queries become tenantId + agent_id only (no current route forwards
-  // additional query params).
-  async function forward(req, res, orchestratorPath) {
+  // queries become tenantId + agent_id, plus any caller-supplied extraQuery
+  // pairs (null/empty values dropped).
+  async function forward(req, res, orchestratorPath, extraQuery) {
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
     if (!baseUrl || !secret) {
@@ -167,6 +167,11 @@ export function createDeepLatticeRouter() {
       body = JSON.stringify(mergedBodyForLog);
     } else {
       const qs = new URLSearchParams({ tenantId, agent_id: agentId });
+      if (extraQuery) {
+        for (const [k, v] of Object.entries(extraQuery)) {
+          if (v != null && v !== "") qs.set(k, String(v));
+        }
+      }
       url = `${url}?${qs.toString()}`;
     }
 
@@ -236,6 +241,17 @@ export function createDeepLatticeRouter() {
   // → GET /internal/deep-lattice/knowledge/:filename?tenantId=&agent_id=
   router.get("/knowledge/:filename", (req, res) => {
     return forward(req, res, `/knowledge/${encodeURIComponent(req.params.filename)}`);
+  });
+
+  // GET /api/deep-lattice/briefings?agentId=&kind=&date=
+  // → GET /internal/deep-lattice/briefings?tenantId=&agent_id=&kind=&for_date=
+  // CRO reads back its briefings, optionally filtered by kind and/or date.
+  // Agent-facing `date` maps to the orchestrator's `for_date` query param.
+  router.get("/briefings", (req, res) => {
+    return forward(req, res, "/briefings", {
+      kind: req.query.kind,
+      for_date: req.query.date ?? req.query.for_date,
+    });
   });
 
   // POST /api/deep-lattice/briefings
