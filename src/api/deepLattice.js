@@ -14,9 +14,13 @@
  * orchestrator can short-circuit the lookup when convenient.
  *
  * No profile/knowledge list/discovery endpoints — agents reach those files by
- * directive-supplied slug/filename. Briefings are the exception: CRO both
- * writes them (POST) and reads them back (GET /briefings, filtered by kind
- * and/or date). The orchestrator gates the read to the CRO agent.
+ * directive-supplied slug/filename. Briefings are written (POST) and read back
+ * (GET /briefings, filtered by kind and/or date).
+ *
+ * NOTE: per-agent authorization has been removed orchestrator-side. The
+ * orchestrator no longer gates which agent may call which operation; the shard
+ * secret authenticates the wrapper, but any agent reaching these endpoints can
+ * perform any DL op.
  *
  * No JWT/Bearer auth on the loopback surface: only reachable from 127.0.0.1
  * (same host); the requireLoopback guard enforces this via
@@ -245,7 +249,7 @@ export function createDeepLatticeRouter() {
 
   // GET /api/deep-lattice/briefings?agentId=&kind=&date=
   // → GET /internal/deep-lattice/briefings?tenantId=&agent_id=&kind=&for_date=
-  // CRO reads back its briefings, optionally filtered by kind and/or date.
+  // Reads back briefings, optionally filtered by kind and/or date.
   // Agent-facing `date` maps to the orchestrator's `for_date` query param.
   router.get("/briefings", (req, res) => {
     return forward(req, res, "/briefings", {
@@ -255,10 +259,40 @@ export function createDeepLatticeRouter() {
   });
 
   // POST /api/deep-lattice/briefings
-  // → POST /internal/deep-lattice/briefings (CRO creates a briefing)
+  // → POST /internal/deep-lattice/briefings (creates a briefing)
   router.post("/briefings", (req, res) => {
     return forward(req, res, "/briefings");
   });
+
+  // ── Agent documents (migration 018) ────────────────────────
+  // analytics_report is typed + filterable; plan / daily_target /
+  // execution_plan are latest-wins (POST writes a version, GET /latest reads
+  // the newest, 404 when none exist yet).
+
+  // POST /api/deep-lattice/analytics-reports → POST /internal/.../analytics-reports
+  router.post("/analytics-reports", (req, res) => {
+    return forward(req, res, "/analytics-reports");
+  });
+
+  // GET /api/deep-lattice/analytics-reports?agentId=&type=&date=
+  // → GET /internal/deep-lattice/analytics-reports?tenantId=&agent_id=&type=&date=
+  router.get("/analytics-reports", (req, res) => {
+    return forward(req, res, "/analytics-reports", {
+      type: req.query.type,
+      date: req.query.date,
+    });
+  });
+
+  // plan | daily_target | execution_plan — POST writes a version; GET /latest
+  // returns the newest (orchestrator 404s when none exist).
+  for (const path of ["plans", "daily-targets", "execution-plans"]) {
+    router.post(`/${path}`, (req, res) => {
+      return forward(req, res, `/${path}`);
+    });
+    router.get(`/${path}/latest`, (req, res) => {
+      return forward(req, res, `/${path}/latest`);
+    });
+  }
 
   return router;
 }

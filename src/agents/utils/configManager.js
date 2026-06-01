@@ -579,9 +579,10 @@ class ConfigManager {
 
   /**
    * Add the Deep Lattice tool names to the global tools.alsoAllow list so
-   * agents can invoke them. Per-agent gating is enforced at the orchestrator's
-   * assertCanPerform layer in v1; we may layer per-agent allowlists later.
-   * Idempotent — skips names already present.
+   * agents can invoke them. There is no longer any per-agent authorization
+   * orchestrator-side (assertCanPerform removed) — tool visibility (the
+   * allowlist) is the only gate, so any agent eligible for these tools can
+   * perform any DL op. Idempotent — skips names already present.
    * Serialised via mutex to prevent concurrent read-modify-write races.
    */
   ensureDeepLatticeToolsAlsoAllow() {
@@ -591,6 +592,15 @@ class ConfigManager {
       "update_profile_file",
       "create_briefing",
       "read_briefings",
+      // Agent documents (migration 018)
+      "create_analytics_report",
+      "read_analytics_reports",
+      "create_plan",
+      "read_latest_plan",
+      "create_daily_target",
+      "read_latest_daily_target",
+      "create_execution_plan",
+      "read_latest_execution_plan",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }
