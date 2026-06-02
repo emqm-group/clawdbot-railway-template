@@ -324,29 +324,34 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "create_analytics_report",
     description:
-      "Create an analytics report. type is one of comprehensive | outreach | social | traffic. title is the list-view headline; content is the full markdown body.",
+      "Create an analytics report. type is one of comprehensive | outreach | social | traffic. duration is the reporting window: daily | weekly. title is the list-view headline; content is the full markdown body.",
     parameters: {
       type: "object",
-      required: ["type", "title", "content"],
+      required: ["type", "duration", "title", "content"],
       additionalProperties: false,
       properties: {
         type: {
           type: "string",
           enum: ["comprehensive", "outreach", "social", "traffic"],
         },
+        duration: {
+          type: "string",
+          enum: ["daily", "weekly"],
+          description: "Reporting window the report covers.",
+        },
         title: { type: "string", description: "Headline shown in the list view." },
         content: { type: "string", description: "Full markdown body of the report." },
       },
     },
-    async execute(_toolCallId, { type, title, content }) {
+    async execute(_toolCallId, { type, duration, title, content }) {
       const agentId = ctx.agentId;
-      log("create_analytics_report", "called", { agentId, type });
+      log("create_analytics_report", "called", { agentId, type, duration });
       try {
-        await callWrapper("POST", "/analytics-reports", { agentId, type, title, content });
-        log("create_analytics_report", "success", { agentId, type });
+        await callWrapper("POST", "/analytics-reports", { agentId, type, duration, title, content });
+        log("create_analytics_report", "success", { agentId, type, duration });
         return okResult({ ok: true });
       } catch (err) {
-        logError("create_analytics_report", err.message, { agentId, type });
+        logError("create_analytics_report", err.message, { agentId, type, duration });
         return errorResult(err.message);
       }
     },
@@ -357,7 +362,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_analytics_reports",
     description:
-      "Read analytics reports, newest first. Optionally filter by type (comprehensive | outreach | social | traffic) and/or date (\"today\" or an ISO date \"YYYY-MM-DD\"). Both filters are optional. Returns each report's type, title, and full markdown content.",
+      "Read analytics reports, newest first. Optionally filter by type (comprehensive | outreach | social | traffic), duration (daily | weekly), and/or date (\"today\" or an ISO date \"YYYY-MM-DD\"). All filters are optional. Returns each report's type, duration, title, and full markdown content.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -366,6 +371,11 @@ export default function register(api) {
           type: "string",
           enum: ["comprehensive", "outreach", "social", "traffic"],
           description: "Filter to reports of this type.",
+        },
+        duration: {
+          type: "string",
+          enum: ["daily", "weekly"],
+          description: "Filter to reports covering this reporting window.",
         },
         date: {
           type: "string",
@@ -376,22 +386,25 @@ export default function register(api) {
     async execute(_toolCallId, args) {
       const agentId = ctx.agentId;
       const type = args?.type;
+      const duration = args?.duration;
       const date = args?.date;
-      log("read_analytics_reports", "called", { agentId, type, date });
+      log("read_analytics_reports", "called", { agentId, type, duration, date });
       try {
         const qs = new URLSearchParams({ agentId });
         if (type) qs.set("type", type);
+        if (duration) qs.set("duration", duration);
         if (date) qs.set("date", date);
         const data = await callWrapper("GET", `/analytics-reports?${qs.toString()}`);
         const items = (data?.items ?? []).map((d) => ({
           type: d.subtype,
+          duration: d.duration,
           title: d.title,
           content: d.content,
         }));
-        log("read_analytics_reports", "success", { agentId, type, date, count: items.length });
+        log("read_analytics_reports", "success", { agentId, type, duration, date, count: items.length });
         return okResult({ items });
       } catch (err) {
-        logError("read_analytics_reports", err.message, { agentId, type, date });
+        logError("read_analytics_reports", err.message, { agentId, type, duration, date });
         return errorResult(err.message);
       }
     },

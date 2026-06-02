@@ -281,11 +281,12 @@ export function createDeepLatticeRouter() {
     return forward(req, res, "/analytics-reports");
   });
 
-  // GET /api/deep-lattice/analytics-reports?agentId=&type=&date=
-  // → GET /internal/deep-lattice/analytics-reports?tenantId=&agent_id=&type=&date=
+  // GET /api/deep-lattice/analytics-reports?agentId=&type=&duration=&date=
+  // → GET /internal/deep-lattice/analytics-reports?tenantId=&agent_id=&type=&duration=&date=
   router.get("/analytics-reports", (req, res) => {
     return forward(req, res, "/analytics-reports", {
       type: req.query.type,
+      duration: req.query.duration,
       date: req.query.date,
     });
   });
