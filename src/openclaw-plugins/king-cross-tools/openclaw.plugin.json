@@ -1,7 +1,7 @@
 {
   "id": "king-cross-tools",
   "name": "King's Cross Tools",
-  "description": "Task management tools for interacting with King's Cross. Provides kc_get_next_task, kc_get_task, kc_update_task, kc_create_task, kc_register_artifact, and kc_delete_artifact.",
+  "description": "Task management tools for interacting with King's Cross. Provides kc_get_next_task, kc_get_task, kc_update_task, kc_create_task, kc_report_status, kc_register_artifact, and kc_delete_artifact.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false

@@ -199,6 +199,64 @@ export default function register(api) {
     },
   }));
 
+  // kc_report_status — respond to a kc:continue liveness ping.
+  // KC sends `kc:continue` (via the liveness sweep) when a task appears stuck.
+  // The agent answers with a single kc_report_status call on the task it
+  // currently has bound: status="ok" if it is alive and progressing, or
+  // status="error" with a message explaining why it cannot proceed.
+  // Only the assigned agent may report; ownership is validated server-side.
+  api.registerTool((ctx) => ({
+    name: "kc_report_status",
+    description:
+      "Respond to a kc:continue liveness ping. Call this exactly once for the task you currently have bound. " +
+      "status=\"ok\" means you are alive and still working — KC stops pinging and you continue normally. " +
+      "status=\"error\" means you are stuck and cannot proceed — supply message explaining why; KC marks the task failed. " +
+      "You must be the assigned agent.",
+    parameters: {
+      type: "object",
+      required: ["taskId", "status"],
+      additionalProperties: false,
+      properties: {
+        taskId: {
+          type: "string",
+          description: "UUID of the task you currently have bound and are reporting on.",
+        },
+        status: {
+          type: "string",
+          enum: ["ok", "error"],
+          description:
+            "\"ok\" if you are alive and progressing; \"error\" if you are stuck and cannot proceed.",
+        },
+        message: {
+          type: "string",
+          description:
+            "Explanation of why you are stuck. Expected when status=\"error\"; may be omitted when status=\"ok\".",
+        },
+      },
+    },
+    async execute(_toolCallId, { taskId, status, message }) {
+      const agentId = ctx.agentId;
+      log("kc_report_status", "called", { agentId, taskId, status, has_message: message !== undefined });
+      try {
+        const body = { agentId, status };
+        if (message !== undefined) body.message = message;
+        // Response carries nothing the agent acts on (counters reset / Outcome A
+        // fire server-side); we just need a minimal ack. Errors (wrong taskId,
+        // not owner) DO surface below so the agent can self-correct.
+        const data = await callWrapper(
+          "POST",
+          `/${encodeURIComponent(taskId)}/liveness-response`,
+          body
+        );
+        log("kc_report_status", "success", { agentId, taskId, status, stale: data.stale ?? false });
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      } catch (err) {
+        logError("kc_report_status", err.message, { agentId, taskId, status });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
   // kc_create_task — create a new task (runtime delegation).
   // The calling agent (ctx.agentId) is recorded as created_by_agent_id.
   // The orchestrator resolves the owning agent from `taskName` (globally

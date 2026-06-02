@@ -21,10 +21,18 @@
  *   On the next successful ensureGatewayRunning() call, pending queues are
  *   drained: approval_actioned entries first (in order), then the wake-up slot.
  *
- * approval_actioned retry on UNAVAILABLE:
+ * liveness_check (retry-path nudge):
+ *   Fired by the orchestrator's liveness sweep when a task looks stuck. Maps to
+ *   the "kc:continue" sentinel. Never coalesced and never retried at the wrapper
+ *   — KC is the sole source of retry truth (it pings up to 3 times on its own
+ *   cadence, then escalates). No taskId: the agent reports on its bound task via
+ *   kc_report_status. If the gateway is mid-turn (UNAVAILABLE) or not running,
+ *   the nudge is dropped; KC's next sweep re-fires it.
+ *
+ * approval_actioned on UNAVAILABLE:
  *   If the gateway returns UNAVAILABLE / "session is still active", the agent is
- *   mid-turn. Retry up to 3 times with backoff: 30 s, 60 s, 120 s. If all
- *   retries are exhausted, log an error — manual operator recovery is needed.
+ *   mid-turn. The wrapper no longer retries — it logs and gives up. KC's liveness
+ *   sweep (Case 3: stuck received_approval) re-nudges via kc:continue.
  */
 
 import express from "express";
@@ -105,6 +113,7 @@ function enqueue(event) {
 // Sentinel wake formats (agent's AGENTS.md must define how to handle these):
 //   "kc:wake"             → call kc_get_next_task
 //   "kc:resume:<taskId>"  → call kc_get_task with the given taskId
+//   "kc:continue"         → call kc_report_status on the currently-bound task
 // Compact and unambiguous vs. a real human message in the same session.
 function buildMessage(event) {
   if (event.event === "tasks_available" || event.event === "task_assigned") {
@@ -112,6 +121,9 @@ function buildMessage(event) {
   }
   if (event.event === "approval_actioned") {
     return `kc:resume:${event.taskId}`;
+  }
+  if (event.event === "liveness_check") {
+    return "kc:continue";
   }
   return null;
 }
@@ -183,58 +195,18 @@ async function isUnavailable(resp) {
 }
 
 // ---------------------------------------------------------------------------
-// approval_actioned delivery with retry on UNAVAILABLE.
-// Retries: 30 s, 60 s, 120 s. After exhaustion, logs and gives up.
+// approval_actioned delivery (no retry).
+// KC owns retry truth now: a stuck received_approval task is re-nudged by the
+// orchestrator's liveness sweep (Case 3) via kc:continue. On UNAVAILABLE or any
+// other failure we log and give up — the wrapper no longer schedules retries.
 // ---------------------------------------------------------------------------
-const APPROVAL_RETRY_DELAYS = [30_000, 60_000, 120_000];
-
-function scheduleApprovalRetry(agentId, message, attempt = 0) {
-  if (attempt >= APPROVAL_RETRY_DELAYS.length) {
-    logger.error(
-      `[KC-NOTIF] approval_actioned exhausted all retries for agent ${agentId} — manual recovery needed`
-    );
-    return;
-  }
-
-  const delay = APPROVAL_RETRY_DELAYS[attempt];
-  logger.warn(
-    `[KC-NOTIF] approval_actioned UNAVAILABLE for agent ${agentId}; retry ${attempt + 1}/${APPROVAL_RETRY_DELAYS.length} in ${delay / 1000}s`
-  );
-
-  setTimeout(async () => {
-    logger.info(`[KC-NOTIF] approval_actioned retry firing`, {
-      agentId,
-      attempt: attempt + 1,
-    });
-    try {
-      const resp = await triggerAgent(agentId, message);
-      if (await isUnavailable(resp)) {
-        scheduleApprovalRetry(agentId, message, attempt + 1);
-      } else if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        logger.error(
-          `[KC-NOTIF] approval_actioned delivery failed for agent ${agentId} [${resp.status}]: ${text}`
-        );
-      } else {
-        logger.info(`[KC-NOTIF] approval_actioned delivered on retry`, {
-          agentId,
-          attempt: attempt + 1,
-        });
-      }
-    } catch (err) {
-      logger.error(
-        `[KC-NOTIF] approval_actioned retry error for agent ${agentId}: ${err.message}`
-      );
-      scheduleApprovalRetry(agentId, message, attempt + 1);
-    }
-  }, delay);
-}
-
 async function dispatchApprovalActioned(agentId, message) {
   try {
     const resp = await triggerAgent(agentId, message);
     if (await isUnavailable(resp)) {
-      scheduleApprovalRetry(agentId, message, 0);
+      logger.warn(
+        `[KC-NOTIF] approval_actioned UNAVAILABLE for agent ${agentId} — giving up; liveness sweep will re-nudge via kc:continue`
+      );
     } else if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       logger.error(
@@ -245,10 +217,35 @@ async function dispatchApprovalActioned(agentId, message) {
     }
   } catch (err) {
     logger.error(
-      `[KC-NOTIF] approval_actioned trigger error for agent ${agentId}: ${err.message}`
+      `[KC-NOTIF] approval_actioned trigger error for agent ${agentId}: ${err.message} — giving up; liveness sweep will re-nudge`
     );
-    // On network error, start retry schedule.
-    scheduleApprovalRetry(agentId, message, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// liveness_check dispatch (kc:continue).
+// Retry-path nudge from KC's liveness sweep. Not coalesced, not retried — KC
+// re-fires on its own cadence. Errors and UNAVAILABLE are logged, not fatal.
+// ---------------------------------------------------------------------------
+async function dispatchLivenessCheck(agentId, message) {
+  try {
+    const resp = await triggerAgent(agentId, message);
+    if (await isUnavailable(resp)) {
+      logger.warn(
+        `[KC-NOTIF] liveness_check UNAVAILABLE for agent ${agentId} — dropped; KC will re-ping next sweep`
+      );
+    } else if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      logger.warn(
+        `[KC-NOTIF] liveness_check trigger failed for agent ${agentId} [${resp.status}]: ${text}`
+      );
+    } else {
+      logger.info(`[KC-NOTIF] liveness_check (kc:continue) delivered`, { agentId });
+    }
+  } catch (err) {
+    logger.warn(
+      `[KC-NOTIF] liveness_check trigger error for agent ${agentId}: ${err.message} — dropped; KC will re-ping`
+    );
   }
 }
 
@@ -355,6 +352,14 @@ async function handleEvent(event, ensureGatewayRunning) {
   });
 
   if (!gatewayReady) {
+    // liveness_check is a retry nudge — never queue it; KC re-fires next sweep.
+    if (event.event === "liveness_check") {
+      logger.warn(
+        `[KC-NOTIF] gateway not ready — dropping liveness_check for agent ${agentId}; KC will re-ping`,
+        { reason: gatewayErr }
+      );
+      return;
+    }
     enqueue(event);
     logger.warn(
       `[KC-NOTIF] gateway not ready — queued ${event.event} for agent ${agentId}`,
@@ -370,7 +375,11 @@ async function handleEvent(event, ensureGatewayRunning) {
   }
 
   // Now process the current event.
-  if (event.event === "approval_actioned") {
+  if (event.event === "liveness_check") {
+    // Retry nudge — never coalesced, never retried at the wrapper.
+    logger.info(`[KC-NOTIF] dispatching liveness_check (kc:continue)`, { agentId });
+    await dispatchLivenessCheck(agentId, message);
+  } else if (event.event === "approval_actioned") {
     // Never coalesced.
     logger.info(`[KC-NOTIF] dispatching approval_actioned`, { agentId, taskId: event.taskId });
     await dispatchApprovalActioned(agentId, message);
@@ -441,6 +450,7 @@ export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
    *   { event: "tasks_available",   agentId }
    *   { event: "task_assigned",     agentId, taskId }
    *   { event: "approval_actioned", agentId, taskId }
+   *   { event: "liveness_check",    agentId }            → kc:continue
    *
    * Responds immediately (202) — agent triggering is async.
    */
@@ -461,7 +471,7 @@ export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
       return res.status(400).json({ error: "event and agentId are required" });
     }
 
-    const VALID_EVENTS = new Set(["tasks_available", "task_assigned", "approval_actioned"]);
+    const VALID_EVENTS = new Set(["tasks_available", "task_assigned", "approval_actioned", "liveness_check"]);
     if (!VALID_EVENTS.has(event)) {
       logger.warn(`[KC-NOTIF] validation failed: unknown event type`, { event, agentId });
       return res.status(400).json({ error: `Unknown event type: ${event}` });

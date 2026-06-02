@@ -224,6 +224,14 @@ export function createTasksRouter() {
     return forward(req, res, "");
   });
 
+  // POST /api/tasks/:taskId/liveness-response
+  // → POST /internal/tasks/:taskId/liveness-response
+  // kc_report_status — agent's reply to a kc:continue ping. Body carries
+  // { agentId, status, message } from the plugin; tenantId is merged by forward.
+  router.post("/:taskId/liveness-response", (req, res) => {
+    return forward(req, res, `/${encodeURIComponent(req.params.taskId)}/liveness-response`);
+  });
+
   // POST /api/tasks/:taskId/artifacts
   router.post("/:taskId/artifacts", (req, res) => {
     return forward(req, res, `/${encodeURIComponent(req.params.taskId)}/artifacts`);

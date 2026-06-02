@@ -515,6 +515,7 @@ class ConfigManager {
       "kc_get_task",
       "kc_update_task",
       "kc_create_task",
+      "kc_report_status",
     ];
     return this.patchGlobalToolsAlsoAllow("add", KC_TOOLS);
   }
