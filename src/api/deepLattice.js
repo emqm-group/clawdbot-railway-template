@@ -272,9 +272,10 @@ export function createDeepLatticeRouter() {
   });
 
   // ── Agent documents (migration 018) ────────────────────────
-  // analytics_report is typed + filterable; plan / daily_target /
-  // execution_plan are latest-wins (POST writes a version, GET /latest reads
-  // the newest, 404 when none exist yet).
+  // analytics_report is typed + filterable; plan is subtyped + latest-wins per
+  // subtype (migration 023); daily_target / execution_plan are untyped
+  // latest-wins (POST writes a version, GET /latest reads the newest, 404 when
+  // none exist yet).
 
   // POST /api/deep-lattice/analytics-reports → POST /internal/.../analytics-reports
   router.post("/analytics-reports", (req, res) => {
@@ -291,9 +292,20 @@ export function createDeepLatticeRouter() {
     });
   });
 
-  // plan | daily_target | execution_plan — POST writes a version; GET /latest
-  // returns the newest (orchestrator 404s when none exist).
-  for (const path of ["plans", "daily-targets", "execution-plans"]) {
+  // plan — subtyped + latest-wins per subtype (migration 023). POST carries
+  // `subtype` in the body (flows through forward's ...rest); GET /plans/latest
+  // requires ?subtype= (gtm|content-strategy|outbound-strategy), forwarded as
+  // extraQuery. Orchestrator 404s when no plan exists for that subtype.
+  router.post("/plans", (req, res) => {
+    return forward(req, res, "/plans");
+  });
+  router.get("/plans/latest", (req, res) => {
+    return forward(req, res, "/plans/latest", { subtype: req.query.subtype });
+  });
+
+  // daily_target | execution_plan — untyped latest-wins. POST writes a version;
+  // GET /latest returns the newest (orchestrator 404s when none exist).
+  for (const path of ["daily-targets", "execution-plans"]) {
     router.post(`/${path}`, (req, res) => {
       return forward(req, res, `/${path}`);
     });

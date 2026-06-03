@@ -13,7 +13,9 @@
 // specific profile slugs and knowledge filenames by name. create_briefing
 // writes a briefing; read_briefings reads them back, filtered by kind and/or
 // date. Agent documents are agent-authored working docs: analytics reports are
-// typed + filterable; plan / daily_target / execution_plan are latest-wins.
+// typed + filterable; plan is subtyped (gtm | content-strategy |
+// outbound-strategy) and latest-wins per subtype; daily_target / execution_plan
+// are untyped latest-wins.
 //
 // NOTE: agent-level authorization has been removed orchestrator-side — there
 // is no longer a per-agent gate (no assertCanPerform). Any agent that has the
@@ -410,17 +412,75 @@ export default function register(api) {
     },
   }));
 
-  // Latest-wins doc categories: each gets a create + a read-latest tool. The
-  // write/read shapes are identical across the three, so register them from a
-  // table to avoid copy-paste drift.
-  const LATEST_DOC_TOOLS = [
-    {
-      category: "plan",
-      path: "plans",
-      noun: "plan",
-      createName: "create_plan",
-      readName: "read_latest_plan",
+  // plan — subtyped + latest-wins per subtype (migration 023). Unlike the
+  // untyped latest-wins docs below, both create and read take a required
+  // `subtype` (gtm | content-strategy | outbound-strategy); each subtype is an
+  // independent latest-wins document, so a read must name which one.
+  const PLAN_SUBTYPES = ["gtm", "content-strategy", "outbound-strategy"];
+
+  api.registerTool((ctx) => ({
+    name: "create_plan",
+    description:
+      "Create a plan. subtype is one of gtm | content-strategy | outbound-strategy — each is an independent latest-wins document. title is the list-view headline; content is the full markdown body. This writes a new version of that subtype — reads return the most recent for the subtype.",
+    parameters: {
+      type: "object",
+      required: ["subtype", "title", "content"],
+      additionalProperties: false,
+      properties: {
+        subtype: { type: "string", enum: PLAN_SUBTYPES },
+        title: { type: "string", description: "Headline shown in the list view." },
+        content: { type: "string", description: "Full markdown body of the plan." },
+      },
     },
+    async execute(_toolCallId, { subtype, title, content }) {
+      const agentId = ctx.agentId;
+      log("create_plan", "called", { agentId, subtype });
+      try {
+        await callWrapper("POST", "/plans", { agentId, subtype, title, content });
+        log("create_plan", "success", { agentId, subtype });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("create_plan", err.message, { agentId, subtype });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  api.registerTool((ctx) => ({
+    name: "read_latest_plan",
+    description:
+      "Read the most recent plan for a subtype (gtm | content-strategy | outbound-strategy). Returns its title and full markdown content, or { item: null } if none exists yet for that subtype.",
+    parameters: {
+      type: "object",
+      required: ["subtype"],
+      additionalProperties: false,
+      properties: {
+        subtype: { type: "string", enum: PLAN_SUBTYPES },
+      },
+    },
+    async execute(_toolCallId, { subtype }) {
+      const agentId = ctx.agentId;
+      log("read_latest_plan", "called", { agentId, subtype });
+      try {
+        const qs = new URLSearchParams({ agentId, subtype });
+        const data = await callWrapper("GET", `/plans/latest?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+        });
+        const item = data ? { title: data.title, content: data.content } : null;
+        log("read_latest_plan", "success", { agentId, subtype, found: Boolean(item) });
+        return okResult({ item });
+      } catch (err) {
+        logError("read_latest_plan", err.message, { agentId, subtype });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // Untyped latest-wins doc categories: each gets a create + a read-latest tool.
+  // The write/read shapes are identical across the two, so register them from a
+  // table to avoid copy-paste drift. (plan is handled above — it carries a
+  // subtype and so does not fit this uniform shape.)
+  const LATEST_DOC_TOOLS = [
     {
       category: "daily_target",
       path: "daily-targets",
