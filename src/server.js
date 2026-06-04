@@ -628,6 +628,85 @@ function aliasLlmAuthEnvVar() {
   console.log(`[wrapper] aliased OPENCLAW_AUTH_SECRET → ${runtimeEnvVar}`);
 }
 
+// Maps an openclaw provider id (the "provider" half of a "provider/model" id)
+// to the canonical runtime env var openclaw reads the key from at request time
+// (openclaw model-auth-env-vars.ts PROVIDER_ENV_API_KEY_CANDIDATES). Fallback
+// providers are never onboarded, so their keys live only in env: openclaw
+// resolves them via resolveEnvApiKey and injects them into in-memory auth
+// storage for the call — they never land on disk (no auth-profiles.json entry).
+const PROVIDER_RUNTIME_ENV = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GEMINI_API_KEY",
+};
+
+// Per-provider fallback keys arrive as OPENCLAW_FALLBACK_KEY_<PROVIDER> (provider
+// uppercased, e.g. OPENCLAW_FALLBACK_KEY_OPENAI) and get aliased into the
+// canonical runtime env var above. Provider-agnostic: any provider in
+// PROVIDER_RUNTIME_ENV can be a primary or a fallback, in any combination.
+const FALLBACK_KEY_ENV_PREFIX = "OPENCLAW_FALLBACK_KEY_";
+
+// Extract the provider id from a "provider/model" ref, normalized to lowercase.
+function modelRefProvider(modelRef) {
+  const slash = String(modelRef || "").indexOf("/");
+  return slash === -1 ? "" : modelRef.slice(0, slash).trim().toLowerCase();
+}
+
+// Parse OPENCLAW_FALLBACK_MODELS (comma-separated, ordered) into a clean list.
+function parseFallbackModels() {
+  return (process.env.OPENCLAW_FALLBACK_MODELS || "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+}
+
+// Mirror OPENCLAW_FALLBACK_KEY_<PROVIDER> onto each provider's canonical runtime
+// env var (e.g. OPENCLAW_FALLBACK_KEY_OPENAI → OPENAI_API_KEY) every boot, so
+// already-onboarded shards (where runAutoSetup is skipped) still expose fallback
+// provider keys in env. Runs after aliasLlmAuthEnvVar(); never overwrites a
+// canonical var the primary already populated, so OPENCLAW_AUTH_SECRET wins for
+// the primary's own provider. Never writes to disk.
+function aliasFallbackLlmKeys() {
+  for (const [provider, runtimeEnvVar] of Object.entries(PROVIDER_RUNTIME_ENV)) {
+    const key = (process.env[`${FALLBACK_KEY_ENV_PREFIX}${provider.toUpperCase()}`] || "").trim();
+    if (!key) continue;
+    if ((process.env[runtimeEnvVar] || "").trim()) {
+      // Already populated by the primary alias or set directly on the service —
+      // that value wins; do not clobber it with the fallback key.
+      console.log(
+        `[wrapper] ${runtimeEnvVar} already set — ignoring ${FALLBACK_KEY_ENV_PREFIX}${provider.toUpperCase()}`,
+      );
+      continue;
+    }
+    process.env[runtimeEnvVar] = key;
+    console.log(`[wrapper] aliased ${FALLBACK_KEY_ENV_PREFIX}${provider.toUpperCase()} → ${runtimeEnvVar}`);
+  }
+}
+
+// Validate the fallback model chain's provider keys. Returns an error string, or
+// null if satisfiable. A cross-provider fallback (provider != primary) is never
+// onboarded, so it must authenticate from its canonical env key — aliased at
+// boot from OPENCLAW_FALLBACK_KEY_<PROVIDER>. Same-provider fallbacks ride on the
+// primary's onboarded auth (which may be OAuth/token), so they need no key.
+// Relies on aliasFallbackLlmKeys() having run at boot to populate the canonical
+// vars this checks.
+function validateFallbackChain(defaultModel) {
+  const primaryProvider = modelRefProvider(defaultModel);
+  const missing = [];
+  for (const provider of new Set(parseFallbackModels().map(modelRefProvider))) {
+    if (!provider || provider === primaryProvider) continue;
+    const runtimeEnvVar = PROVIDER_RUNTIME_ENV[provider];
+    if (!runtimeEnvVar) {
+      missing.push(`unsupported fallback provider "${provider}" (no key mapping in PROVIDER_RUNTIME_ENV)`);
+      continue;
+    }
+    if (!(process.env[runtimeEnvVar] || "").trim()) {
+      missing.push(`fallback provider "${provider}" has no key — set ${FALLBACK_KEY_ENV_PREFIX}${provider.toUpperCase()}`);
+    }
+  }
+  return missing.length ? `fallback model chain has unmet provider keys: ${missing.join("; ")}` : null;
+}
+
 const AUTH_GROUPS = [
   {
     value: "openai",
@@ -977,6 +1056,25 @@ async function runAutoSetup() {
     return;
   }
 
+  // Validate the fallback chain up-front, before onboard mutates anything, so a
+  // misconfigured chain fails cleanly (no partial config, runAutoSetup re-runs
+  // and re-fails loudly on every reboot until fixed).
+  const defaultModel = process.env.OPENCLAW_DEFAULT_MODEL?.trim();
+  if (defaultModel) {
+    const chainError = validateFallbackChain(defaultModel);
+    if (chainError) {
+      console.error(`[auto-setup] ${chainError}`);
+      await notifyOrchestrator("failed", chainError);
+      return;
+    }
+  } else if (parseFallbackModels().length) {
+    // Fallbacks attach to a primary; without OPENCLAW_DEFAULT_MODEL the model
+    // object is never written, so they'd be silently dropped. Warn loudly.
+    console.warn(
+      "[auto-setup] OPENCLAW_FALLBACK_MODELS is set but OPENCLAW_DEFAULT_MODEL is not — fallbacks ignored (a primary model is required).",
+    );
+  }
+
   console.log("[auto-setup] starting automated openclaw setup...");
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -1075,13 +1173,21 @@ async function runAutoSetup() {
 
   // agents.defaults.model is an object per openclaw's schema:
   // { primary: "<provider/model>", fallbacks?: [...] } — not a bare string.
-  const defaultModel = process.env.OPENCLAW_DEFAULT_MODEL?.trim();
+  // The chain is provider-agnostic: primary + each fallback may be any supported
+  // provider, in any combination (OPENCLAW_FALLBACK_MODELS, ordered). Keys were
+  // already validated up-front by validateFallbackChain().
   if (defaultModel) {
+    const fallbackModels = parseFallbackModels();
+    const modelConfig = { primary: defaultModel };
+    if (fallbackModels.length) modelConfig.fallbacks = fallbackModels;
     await runCmd(OPENCLAW_NODE, clawArgs([
       "config", "set", "--json", "agents.defaults.model",
-      JSON.stringify({ primary: defaultModel }),
+      JSON.stringify(modelConfig),
     ]));
-    console.log(`[auto-setup] default model set to ${defaultModel}`);
+    console.log(
+      `[auto-setup] default model set to ${defaultModel}` +
+        (fallbackModels.length ? ` with fallbacks: ${fallbackModels.join(", ")}` : ""),
+    );
   }
 
   // Enable /v1/responses HTTP endpoint (required for webchat)
@@ -2169,6 +2275,9 @@ const server = app.listen(PORT, "::", async () => {
   // Alias LLM auth env var before any openclaw subprocess (onboard / gateway)
   // is spawned so the key is available in their inherited env.
   aliasLlmAuthEnvVar();
+  // Then mirror any fallback provider keys into their canonical runtime vars,
+  // so cross-provider model fallbacks can authenticate from env alone.
+  aliasFallbackLlmKeys();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
