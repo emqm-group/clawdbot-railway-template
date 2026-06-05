@@ -521,6 +521,21 @@ class ConfigManager {
   }
 
   /**
+   * Add the built-in web_search tool to the global tools.alsoAllow list so it
+   * clears the profile stage of the tool-policy pipeline (web_search has
+   * profiles: [] in the v2026.3.8 catalog, so neither coding nor messaging
+   * exposes it). This is the profile-stage unlock ONLY — an agent still needs
+   * web_search in its own tools.allow (the agent-stage gate) to actually invoke
+   * it. That per-agent allow is propagated from the base-agent slices
+   * (orchestrator PROPAGATED_TOOLS), not written here. web_search is built-in,
+   * so unlike KC/DL there is no plugin block to register.
+   * Idempotent — skips if already present.
+   */
+  ensureWebSearchToolAlsoAllow() {
+    return this.patchGlobalToolsAlsoAllow("add", ["web_search"]);
+  }
+
+  /**
    * Write the deep-lattice-tools plugin config block into openclaw.json.
    * Mirrors ensureKingsCrossToolsPlugin — idempotent direct config write.
    * Serialised via mutex to prevent concurrent read-modify-write races.

@@ -683,6 +683,43 @@ function aliasFallbackLlmKeys() {
   }
 }
 
+// Maps a web-search provider id (tools.web.search.provider) to the canonical env
+// var openclaw auto-detects the key from (see the provider precedence list in the
+// web-search docs). Mirrors PROVIDER_RUNTIME_ENV but for search providers.
+const WEB_SEARCH_PROVIDER_ENV = {
+  brave: "BRAVE_API_KEY",
+  tavily: "TAVILY_API_KEY",
+  exa: "EXA_API_KEY",
+  perplexity: "PERPLEXITY_API_KEY",
+  firecrawl: "FIRECRAWL_API_KEY",
+  gemini: "GEMINI_API_KEY",
+};
+
+// The web-search key arrives namespaced as OPENCLAW_WEB_SEARCH_KEY (same contract
+// shape as OPENCLAW_AUTH_SECRET / OPENCLAW_FALLBACK_KEY_*) and gets aliased onto
+// the canonical env var openclaw auto-detects for the configured provider.
+// OPENCLAW_WEB_SEARCH_PROVIDER selects the target var (defaults to brave, which is
+// the provider pinned in the base shard's tools.web.search.provider). Aliasing —
+// rather than writing the key into openclaw.json — keeps the secret out of disk
+// and sidesteps the config-read bug (openclaw#23058). Don't-clobber + logging
+// match aliasFallbackLlmKeys(). Never writes to disk.
+function aliasWebSearchKey() {
+  const key = (process.env.OPENCLAW_WEB_SEARCH_KEY || "").trim();
+  if (!key) return;
+  const provider = (process.env.OPENCLAW_WEB_SEARCH_PROVIDER || "brave").trim().toLowerCase();
+  const runtimeEnvVar = WEB_SEARCH_PROVIDER_ENV[provider];
+  if (!runtimeEnvVar) {
+    console.warn(`[wrapper] unknown OPENCLAW_WEB_SEARCH_PROVIDER="${provider}" — web-search key not aliased`);
+    return;
+  }
+  if ((process.env[runtimeEnvVar] || "").trim()) {
+    console.log(`[wrapper] ${runtimeEnvVar} already set — ignoring OPENCLAW_WEB_SEARCH_KEY`);
+    return;
+  }
+  process.env[runtimeEnvVar] = key;
+  console.log(`[wrapper] aliased OPENCLAW_WEB_SEARCH_KEY → ${runtimeEnvVar} (provider=${provider})`);
+}
+
 // Validate the fallback model chain's provider keys. Returns an error string, or
 // null if satisfiable. A cross-provider fallback (provider != primary) is never
 // onboarded, so it must authenticate from its canonical env key — aliased at
@@ -1215,6 +1252,11 @@ async function runAutoSetup() {
   await configManager.ensureDeepLatticeToolsPlugin(deepLatticePluginPath);
   await configManager.ensureDeepLatticeToolsAlsoAllow();
   console.log("[auto-setup] deep-lattice-tools plugin config written");
+
+  // Built-in web_search: profile-stage unlock only (no plugin). Per-agent
+  // tools.allow is propagated from base agents (orchestrator side).
+  await configManager.ensureWebSearchToolAlsoAllow();
+  console.log("[auto-setup] web_search tool alsoAllow ensured");
 
   // Cross-tenant fs guard — non-negotiable on shared shards (Wrapper Impl #6).
   const fsTenantGuardPath = path.join(APP_ROOT, "src", "openclaw-plugins", "fs-tenant-guard");
@@ -2278,6 +2320,9 @@ const server = app.listen(PORT, "::", async () => {
   // Then mirror any fallback provider keys into their canonical runtime vars,
   // so cross-provider model fallbacks can authenticate from env alone.
   aliasFallbackLlmKeys();
+  // Alias the web-search key onto its provider's canonical env var so the gateway
+  // auto-detects the search provider from env alone.
+  aliasWebSearchKey();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
@@ -2374,6 +2419,15 @@ const server = app.listen(PORT, "::", async () => {
     } catch (err) {
       console.warn(`[wrapper] failed to write deep-lattice-tools plugin config: ${err.message}`);
       allPluginsWritten = false;
+    }
+
+    // web_search lives in tools.alsoAllow, not the plugins block — a failure here
+    // must NOT gate notifyOrchestratorPluginsRefresh() below. Self-heals next boot.
+    try {
+      await configManager.ensureWebSearchToolAlsoAllow();
+      console.log("[wrapper] web_search tool alsoAllow ensured");
+    } catch (err) {
+      console.warn(`[wrapper] failed to ensure web_search alsoAllow: ${err.message}`);
     }
 
     // Cross-tenant fs guard — required on every shared shard (Wrapper Impl #6).
