@@ -134,8 +134,10 @@ export function createDeepLatticeRouter() {
   // Generic forward — for endpoints that map 1:1 to a single orchestrator
   // call. POST/PUT/PATCH bodies are extended with tenantId + agent_id; GET
   // queries become tenantId + agent_id, plus any caller-supplied extraQuery
-  // pairs (null/empty values dropped).
-  async function forward(req, res, orchestratorPath, extraQuery) {
+  // pairs (null/empty values dropped). basePath defaults to the Deep Lattice
+  // internal prefix; pass another (e.g. "/internal/buffer") for sibling
+  // internal routers that share the same shard-secret auth model.
+  async function forward(req, res, orchestratorPath, extraQuery, { basePath = "/internal/deep-lattice" } = {}) {
     const baseUrl = ORCHESTRATOR_URL();
     const secret = ORCHESTRATOR_SECRET();
     if (!baseUrl || !secret) {
@@ -154,7 +156,7 @@ export function createDeepLatticeRouter() {
     const method = req.method;
     const isBodyMethod = method === "POST" || method === "PATCH" || method === "PUT";
 
-    let url = `${baseUrl}/internal/deep-lattice${orchestratorPath}`;
+    let url = `${baseUrl}${basePath}${orchestratorPath}`;
 
     const headers = {
       "Content-Type": "application/json",
@@ -301,6 +303,17 @@ export function createDeepLatticeRouter() {
   });
   router.get("/plans/latest", (req, res) => {
     return forward(req, res, "/plans/latest", { subtype: req.query.subtype });
+  });
+
+  // GET /api/deep-lattice/social-posts?agentId=&channel=
+  // → GET /internal/buffer/posts?tenantId=&agent_id=&channel=
+  // Read-only: the tenant's drafted/published social posts, newest first, each
+  // with its latest content. Lives on the orchestrator's /internal/buffer
+  // router (sibling to deep-lattice, same shard-secret auth). `channel` ∈
+  // linkedin_page | linkedin_personal | x scopes the read server-side (before
+  // the cap); the read_social_posts tool always supplies it.
+  router.get("/social-posts", (req, res) => {
+    return forward(req, res, "/posts", { channel: req.query.channel }, { basePath: "/internal/buffer" });
   });
 
   // daily_target | execution_plan — untyped latest-wins. POST writes a version;

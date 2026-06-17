@@ -619,6 +619,8 @@ class ConfigManager {
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only
       "read_template",
+      // Social posts — read-only, routes to /internal/buffer/posts
+      "read_social_posts",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }
