@@ -1227,6 +1227,16 @@ async function runAutoSetup() {
     );
   }
 
+  // Disable heartbeat globally — no agents use it; avoids idle token burn on
+  // configured-but-uncalled agents. Must be an explicit {every:"0m"}; an empty
+  // {} does NOT disable (openclaw bug #64293). With no per-agent heartbeat
+  // blocks, this default applies uniformly to every agent.
+  await runCmd(OPENCLAW_NODE, clawArgs([
+    "config", "set", "--json", "agents.defaults.heartbeat",
+    JSON.stringify({ every: "0m" }),
+  ]));
+  console.log("[auto-setup] heartbeat disabled (agents.defaults.heartbeat.every=0m)");
+
   // Enable /v1/responses HTTP endpoint (required for webchat)
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "gateway.http.endpoints.responses.enabled", "true"]));
   console.log("[auto-setup] gateway.http.endpoints.responses.enabled set to true");
