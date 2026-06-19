@@ -3,8 +3,8 @@
  *
  * All inbound /api/* routes authenticate against a single per-shard Bearer:
  * OPENCLAW_GATEWAY_TOKEN (Decision #8 / Wrapper Impl #2). Loopback-only
- * endpoints (/api/tools/invoke, /api/tasks/*, /api/deep-lattice/*) keep
- * their existing IP guards.
+ * endpoints (/api/tools/invoke, /api/tasks/*, /api/deep-lattice/*,
+ * /api/content/*) keep their existing IP guards.
  */
 import agentRoutes from "./agents/routes/agentRoutes.js";
 import fileRoutes from "./agents/routes/fileRoutes.js";
@@ -14,6 +14,7 @@ import { createDirectivesRouter } from "./agents/routes/directivesRoutes.js";
 import { createNotificationsRouter } from "./api/notifications.js";
 import { createTasksRouter } from "./api/tasks.js";
 import { createDeepLatticeRouter } from "./api/deepLattice.js";
+import { createContentRouter } from "./api/content.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 import openclawService from "./agents/utils/openclawService.js";
@@ -51,6 +52,13 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
   // list/discovery or briefing-read endpoints — agents reach knowledge by
   // directive-supplied filename, and CRO is write-only for briefings.
   app.use("/api/deep-lattice", createDeepLatticeRouter());
+
+  // Content proxy — loopback-only, called by the content-tools plugin inside
+  // gateway. Same transport as deep-lattice, but a separate service:
+  // published-content reads (social posts via /internal/buffer, blog posts via
+  // /internal/blog). The blog write (draft_blog_post) goes through
+  // /api/tools/invoke, not here.
+  app.use("/api/content", createContentRouter());
 
   /**
    * POST /api/devices/approve

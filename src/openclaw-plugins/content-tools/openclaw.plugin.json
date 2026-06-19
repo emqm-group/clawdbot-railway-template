@@ -1,0 +1,9 @@
+{
+  "id": "content-tools",
+  "name": "Content Tools",
+  "description": "Published-content tools: read the tenant's social media posts (Buffer) and blog posts (metadata projected out), and draft blog posts. Blog is fully internal (no OAuth), so draft_blog_post is defined statically here; Buffer social writes remain manifest-driven.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

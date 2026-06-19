@@ -1263,6 +1263,16 @@ async function runAutoSetup() {
   await configManager.ensureDeepLatticeToolsAlsoAllow();
   console.log("[auto-setup] deep-lattice-tools plugin config written");
 
+  // Content tools (social + blog posts) — a separate service from Deep Lattice.
+  // All three tools (read_social_posts, read_blog_posts, draft_blog_post) are
+  // defined statically by this plugin: blog is fully internal (no OAuth), so the
+  // draft WRITE is baked into openclaw.json here rather than pushed on a connect
+  // event like Buffer. alsoAllow unlocks all three names at the profile stage.
+  const contentPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "content-tools");
+  await configManager.ensureContentToolsPlugin(contentPluginPath);
+  await configManager.ensureContentToolsAlsoAllow();
+  console.log("[auto-setup] content-tools plugin config written");
+
   // Built-in web_search: profile-stage unlock only (no plugin). Per-agent
   // tools.allow is propagated from base agents (orchestrator side).
   await configManager.ensureWebSearchToolAlsoAllow();
@@ -2428,6 +2438,19 @@ const server = app.listen(PORT, "::", async () => {
       console.log("[wrapper] deep-lattice-tools plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write deep-lattice-tools plugin config: ${err.message}`);
+      allPluginsWritten = false;
+    }
+
+    // Content tools (social + blog reads + blog draft) — separate plugin from
+    // Deep Lattice. Lands on existing tenants on redeploy; the plugins-refresh
+    // below tells the orchestrator about it so it isn't wiped on the next PUT.
+    const contentPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "content-tools");
+    try {
+      await configManager.ensureContentToolsPlugin(contentPluginPath);
+      await configManager.ensureContentToolsAlsoAllow();
+      console.log("[wrapper] content-tools plugin config ensured");
+    } catch (err) {
+      console.warn(`[wrapper] failed to write content-tools plugin config: ${err.message}`);
       allPluginsWritten = false;
     }
 

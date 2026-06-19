@@ -619,10 +619,87 @@ class ConfigManager {
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only
       "read_template",
-      // Social posts — read-only, routes to /internal/buffer/posts
-      "read_social_posts",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
+  }
+
+  /**
+   * Write the content-tools plugin config block into openclaw.json.
+   * Mirrors ensureDeepLatticeToolsPlugin — idempotent direct config write.
+   * Serialised via mutex to prevent concurrent read-modify-write races.
+   * @param {string} pluginPath - Absolute path to the plugin directory
+   */
+  ensureContentToolsPlugin(pluginPath) {
+    return this._mutex.acquire(() => {
+      const config = this.readConfig();
+
+      const pluginsSection = config.plugins ?? {};
+
+      const currentAllow = pluginsSection.allow ?? [];
+      const allow = currentAllow.includes("content-tools")
+        ? currentAllow
+        : [...currentAllow, "content-tools"];
+
+      const currentPaths = pluginsSection.load?.paths ?? [];
+      const paths = currentPaths.includes(pluginPath)
+        ? currentPaths
+        : [...currentPaths, pluginPath];
+
+      const entries = {
+        ...(pluginsSection.entries ?? {}),
+        "content-tools": {
+          ...(pluginsSection.entries?.["content-tools"] ?? {}),
+          enabled: true,
+        },
+      };
+
+      const existingInstall = pluginsSection.installs?.["content-tools"] ?? {};
+      const installs = {
+        ...(pluginsSection.installs ?? {}),
+        "content-tools": {
+          source: "path",
+          sourcePath: pluginPath,
+          installPath: pluginPath,
+          version: "1.0.0",
+          installedAt: existingInstall.installedAt ?? new Date().toISOString(),
+        },
+      };
+
+      const updated = {
+        ...config,
+        plugins: {
+          ...pluginsSection,
+          allow,
+          load: { ...(pluginsSection.load ?? {}), paths },
+          entries,
+          installs,
+        },
+      };
+
+      this.writeConfig(updated);
+      logger.info("ConfigManager: ensured content-tools plugin config", { pluginPath });
+    });
+  }
+
+  /**
+   * Add the content tool names to the global tools.alsoAllow list so agents can
+   * invoke them. All three are defined statically by the content-tools plugin —
+   * read_social_posts / read_blog_posts (reads) and draft_blog_post (blog WRITE).
+   * Blog is fully internal (no OAuth), so unlike Buffer its tool is NOT pushed via
+   * /api/tools/register on a connect event — it is baked into openclaw.json at
+   * auto-setup, which is why all three names are unlocked here from the start.
+   * Plugin tools are not in the coding/messaging profiles, so this profile-stage
+   * unlock is required for them to be eligible (per-agent tools.allow is the
+   * actual gate, propagated from base agents orchestrator-side). Idempotent —
+   * skips names already present. Serialised via mutex.
+   */
+  ensureContentToolsAlsoAllow() {
+    const CONTENT_TOOLS = [
+      "read_social_posts",
+      "read_blog_posts",
+      "draft_blog_post",
+    ];
+    return this.patchGlobalToolsAlsoAllow("add", CONTENT_TOOLS);
   }
 
   /**

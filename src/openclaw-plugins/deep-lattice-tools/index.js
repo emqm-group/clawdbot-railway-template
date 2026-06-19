@@ -1,10 +1,9 @@
 // Deep Lattice Tools plugin.
-// Registers 15 tools that expose Deep Lattice file access to agents:
+// Registers 14 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
 //   Briefings: create_briefing, read_briefings.
-//   Social posts: read_social_posts (read-only, /internal/buffer/posts).
 //   Agent documents (migration 018): create_analytics_report,
 //     read_analytics_reports, create_plan, read_latest_plan,
 //     create_daily_target, read_latest_daily_target, create_execution_plan,
@@ -311,46 +310,6 @@ export default function register(api) {
         return okResult({ items });
       } catch (err) {
         logError("read_briefings", err.message, { agentId, kind, date });
-        return errorResult(err.message);
-      }
-    },
-  }));
-
-  // read_social_posts — read back the tenant's drafted/published social posts,
-  // newest first, each with its latest content (fetched from the bucket
-  // orchestrator-side). Read-only: writes happen via the draft/post invoke path,
-  // not here. Routes to the orchestrator's /internal/buffer/posts endpoint.
-  api.registerTool((ctx) => ({
-    name: "read_social_posts",
-    description:
-      "Read the tenant's social media post contents for one channel, newest first. channel is required — one of linkedin_page (company page), linkedin_personal (personal profile), or x. Returns a list of post content strings.",
-    parameters: {
-      type: "object",
-      required: ["channel"],
-      additionalProperties: false,
-      properties: {
-        channel: {
-          type: "string",
-          enum: ["linkedin_page", "linkedin_personal", "x"],
-          description:
-            "The channel to read: linkedin_page (company page), linkedin_personal (personal profile), or x.",
-        },
-      },
-    },
-    async execute(_toolCallId, { channel }) {
-      const agentId = ctx.agentId;
-      log("read_social_posts", "called", { agentId, channel });
-      try {
-        const qs = new URLSearchParams({ agentId, channel });
-        const data = await callWrapper("GET", `/social-posts?${qs.toString()}`);
-        // Agent only needs the post bodies — it already knows the channel it
-        // asked for. Drop all metadata; return just the content strings, and
-        // skip any post whose content failed to load (orchestrator returns "").
-        const items = (data?.items ?? []).map((p) => p.content).filter(Boolean);
-        log("read_social_posts", "success", { agentId, channel, count: items.length });
-        return okResult({ items });
-      } catch (err) {
-        logError("read_social_posts", err.message, { agentId, channel });
         return errorResult(err.message);
       }
     },
