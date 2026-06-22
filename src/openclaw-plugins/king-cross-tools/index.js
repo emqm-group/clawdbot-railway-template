@@ -48,7 +48,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "kc_get_next_task",
     description:
-      "Fetch the next scheduled task assigned to this agent. Returns one task (highest priority, then earliest created_at), or {\"task\":null} if no scheduled tasks remain. When a task is returned, the response also includes founder_timezone (IANA) and current_timestamp (ISO 8601, UTC) — use these as the wall-clock anchor when scheduling downstream work such as social posts. Call this when triggered by a tasks_available or task_assigned notification, and after completing or failing a task to continue your loop — KC does not re-notify after completed or failed.",
+      "Fetch the next scheduled task assigned to this agent. Returns one task (highest priority, then earliest created_at), or {\"task\":null} if no scheduled tasks remain. When a task is returned, the response also includes current_date (YYYY-MM-DD), current_time (e.g. \"2:30 PM\"), and current_day (e.g. \"Monday\") in the founder's local time — the wall-clock anchor for scheduling downstream work such as social posts. Call this when triggered by a tasks_available or task_assigned notification, and after completing or failing a task to continue your loop — KC does not re-notify after completed or failed.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -79,8 +79,9 @@ export default function register(api) {
               type: "text",
               text: JSON.stringify({
                 task: projected,
-                founder_timezone: data.tenant_timezone ?? null,
-                current_timestamp: data.current_timestamp ?? null,
+                current_date: data.current_date ?? null,
+                current_time: data.current_time ?? null,
+                current_day: data.current_day ?? null,
               }),
             },
           ],
