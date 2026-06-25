@@ -585,6 +585,40 @@ class OpenClawService {
   }
 
   /**
+   * Get per-turn usage logs (per-message tokens + cost) for a session key.
+   * Wraps the `sessions.usage.logs` gateway RPC — the per-turn capture source
+   * for task cost tracking. Entries are oldest-first; `tokens`/`cost` are
+   * present only on assistant turns. Not downsampled; gateway caps `limit` at
+   * 1000 and returns the most-recent N when exceeded.
+   * @param {string} sessionKey - e.g. "agent:content-agent-1:main"
+   * @param {object} [opts]
+   * @param {number} [opts.limit] - max messages (gateway caps at 1000; default 200)
+   * @returns {Promise<object>} - `{ logs: [{ timestamp, role, content, tokens?, cost? }, ...] }`
+   */
+  async getSessionUsageLogs(sessionKey, { limit } = {}) {
+    const params = { key: sessionKey };
+    if (limit != null) {
+      params.limit = Math.max(1, Math.min(1000, parseInt(limit) || 200));
+    }
+    const payload = JSON.stringify(params);
+    const command = `openclaw gateway call sessions.usage.logs --json --params '${payload}'`;
+    logger.command(command, { sessionKey, limit });
+    try {
+      const { stdout } = await execAsync(command);
+      return JSON.parse(stdout);
+    } catch (err) {
+      // openclaw exits non-zero on config warnings even when stdout is valid JSON.
+      const stdout = err.stdout || "";
+      if (stdout.trim()) {
+        try {
+          return JSON.parse(stdout);
+        } catch {}
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Get OpenClaw gateway status
    * @returns {Promise<object>} - Gateway status
    */

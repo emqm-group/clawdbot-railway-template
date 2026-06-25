@@ -127,6 +127,60 @@ export async function getAllAgentsUsage(req, res) {
 }
 
 /**
+ * Parse an epoch-milliseconds query param, or null if absent/invalid.
+ * Log timestamps from `sessions.usage.logs` are epoch ms.
+ */
+function parseEpochMs(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * GET /api/usage/agents/:agentId/turns
+ * Per-turn token + cost for an agent's task session (`agent:<agentId>:main`),
+ * the capture source for per-task cost tracking. Wraps `sessions.usage.logs`,
+ * keeps only assistant turns (the rows that carry tokens/cost), and optionally
+ * slices to a task window with epoch-ms bounds.
+ * Query: ?since=<epochMs>&until=<epochMs>&limit=<n>  (all optional)
+ * Returns: { key, since, until, count, totals: { tokens, cost }, turns: [...] }
+ */
+export async function getAgentTaskTurns(req, res) {
+  const { agentId } = req.params;
+  if (!agentId || !/^[A-Za-z0-9_-]+$/.test(agentId)) {
+    return res.status(400).json({ error: "Invalid agentId" });
+  }
+  const since = parseEpochMs(req.query.since);
+  const until = parseEpochMs(req.query.until);
+  const limit = req.query.limit != null ? parseInt(req.query.limit) || 1000 : 1000;
+
+  // KC task turns always run in the agent's pinned main session (see design doc §7).
+  const key = `agent:${agentId}:main`;
+
+  try {
+    const data = await openclawService.getSessionUsageLogs(key, { limit });
+    const logs = Array.isArray(data) ? data : data?.logs ?? [];
+
+    const turns = logs
+      // Only assistant turns carry token/cost usage.
+      .filter((e) => e && e.role === "assistant" && e.tokens != null)
+      // Slice to the task window when bounds are supplied (epoch ms).
+      .filter((e) => (since == null || e.timestamp >= since) && (until == null || e.timestamp <= until))
+      .map((e) => ({ timestamp: e.timestamp, tokens: e.tokens || 0, cost: e.cost || 0 }));
+
+    const totals = turns.reduce(
+      (acc, t) => ({ tokens: acc.tokens + t.tokens, cost: acc.cost + t.cost }),
+      { tokens: 0, cost: 0 }
+    );
+
+    return res.json({ key, since, until, count: turns.length, totals, turns });
+  } catch (error) {
+    logger.error("getAgentTaskTurns failed", error, { agentId, since, until });
+    return res.status(500).json({ error: error.message || "Failed to get agent task turns" });
+  }
+}
+
+/**
  * GET /api/usage/agents/:agentId
  * Cost summary for a specific agent across all its sessions.
  * Query: ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD (optional, defaults to gateway's last 30 days)

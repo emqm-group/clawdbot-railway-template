@@ -319,6 +319,58 @@ class ConfigManager {
   }
 
   /**
+   * Ensure the per-model pricing block (models.providers[].cost) is present.
+   * Idempotent: writes only when a provider block differs from what's already
+   * in openclaw.json (or mode isn't merge), so a redeploy with unchanged rates
+   * does NOT rewrite the file and does NOT trigger a gateway reload. Direct
+   * file write under the mutex — same pattern as the plugin/alsoAllow ensures,
+   * not an `openclaw config set` subprocess.
+   * @param {Record<string, {baseUrl:string, api?:string, models:object[]}>} providers
+   */
+  ensureModelPricing(providers) {
+    return this._mutex.acquire(() => {
+      if (!providers || Object.keys(providers).length === 0) return;
+      const config = this.readConfig();
+      const currentModels = config.models ?? {};
+      const currentProviders = currentModels.providers ?? {};
+
+      // Already in sync? Containment check — tolerant of key ordering and any
+      // extra fields openclaw may add on normalization, so we don't rewrite (and
+      // trigger a reload) on a redeploy when nothing meaningful changed. A
+      // provider is in sync when its baseUrl/api match and every desired model
+      // is present with an equal cost.
+      const costEqual = (a = {}, b = {}) =>
+        ["input", "output", "cacheRead", "cacheWrite"].every(
+          (k) => (a?.[k] ?? null) === (b?.[k] ?? null),
+        );
+      const providerInSync = (stored, desired) => {
+        if (!stored || stored.baseUrl !== desired.baseUrl) return false;
+        if ((stored.api ?? null) !== (desired.api ?? null)) return false;
+        const storedById = new Map((stored.models ?? []).map((m) => [m.id, m]));
+        return desired.models.every((dm) => {
+          const sm = storedById.get(dm.id);
+          return sm && costEqual(sm.cost, dm.cost);
+        });
+      };
+      const modeOk = (currentModels.mode ?? "merge") === "merge";
+      const providersOk = Object.entries(providers).every(
+        ([id, block]) => providerInSync(currentProviders[id], block),
+      );
+      if (modeOk && providersOk) return;
+
+      this.writeConfig({
+        ...config,
+        models: {
+          ...currentModels,
+          mode: "merge",
+          providers: { ...currentProviders, ...providers },
+        },
+      });
+      logger.info("ConfigManager: ensured model pricing", { providers: Object.keys(providers) });
+    });
+  }
+
+  /**
    * Write the third-party-tools plugin config block into openclaw.json.
    * This replaces the CLI-based `plugins install --link` + `plugins enable` approach
    * with a direct config write, which is idempotent and does not require openclaw

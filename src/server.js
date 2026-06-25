@@ -24,6 +24,7 @@ import {
 import logger from "./agents/utils/logger.js";
 import configManager from "./agents/utils/configManager.js";
 import openclawService from "./agents/utils/openclawService.js";
+import { buildModelPricingProviders } from "./config/modelPricing.js";
 
 const internalRouter = createInternalRouter();
 
@@ -660,6 +661,41 @@ function parseFallbackModels() {
     .filter(Boolean);
 }
 
+// Derive the per-model pricing block (models.providers[].cost) from the
+// configured model chain (OPENCLAW_DEFAULT_MODEL + OPENCLAW_FALLBACK_MODELS) and
+// hand it to configManager for an idempotent, single, direct file write. Rates
+// live in src/config/modelPricing.js — the single source of truth. Safe to
+// re-run on every boot: configManager.ensureModelPricing writes only when the
+// rates actually changed, so an unchanged redeploy triggers no write and no
+// gateway reload (same idempotent pattern as the tools.alsoAllow ensure). An
+// unpriced model in the chain is logged and left to report cost 0.
+async function applyModelPricing() {
+  const defaultModel = process.env.OPENCLAW_DEFAULT_MODEL?.trim();
+  if (!defaultModel) return;
+
+  const { providers, unpriced } = buildModelPricingProviders([
+    defaultModel,
+    ...parseFallbackModels(),
+  ]);
+
+  const providerIds = Object.keys(providers);
+  if (providerIds.length) {
+    await configManager.ensureModelPricing(providers);
+    console.log(
+      "[wrapper] model pricing ensured: " +
+        providerIds
+          .map((p) => `${p}/[${providers[p].models.map((m) => m.id).join(", ")}]`)
+          .join("; "),
+    );
+  }
+  if (unpriced.length) {
+    console.warn(
+      `[wrapper] no pricing for: ${unpriced.join(", ")} — their turns report cost 0 ` +
+        "(add rates to src/config/modelPricing.js)",
+    );
+  }
+}
+
 // Mirror OPENCLAW_FALLBACK_KEY_<PROVIDER> onto each provider's canonical runtime
 // env var (e.g. OPENCLAW_FALLBACK_KEY_OPENAI → OPENAI_API_KEY) every boot, so
 // already-onboarded shards (where runAutoSetup is skipped) still expose fallback
@@ -1226,6 +1262,12 @@ async function runAutoSetup() {
         (fallbackModels.length ? ` with fallbacks: ${fallbackModels.join(", ")}` : ""),
     );
   }
+
+  // Per-model pricing so per-turn USD cost resolves in usage reporting (see the
+  // Token & Cost Tracking design). Derived from the configured model chain;
+  // rates live in src/config/modelPricing.js. Also re-applied on every boot (see
+  // the isConfigured block below) so rate changes ship with a redeploy.
+  await applyModelPricing();
 
   // Disable heartbeat globally — no agents use it; avoids idle token burn on
   // configured-but-uncalled agents. Must be an explicit {every:"0m"}; an empty
@@ -2461,6 +2503,16 @@ const server = app.listen(PORT, "::", async () => {
       console.log("[wrapper] web_search tool alsoAllow ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to ensure web_search alsoAllow: ${err.message}`);
+    }
+
+    // Per-model pricing (per-turn cost tracking) — re-applied on redeploy so a
+    // rate change in src/config/modelPricing.js lands on existing shards, and
+    // self-heals if a config push ever drops it. Mirrors the tools.alsoAllow
+    // re-ensure above; rates derive from the configured model chain.
+    try {
+      await applyModelPricing();
+    } catch (err) {
+      console.warn(`[wrapper] failed to apply model pricing: ${err.message}`);
     }
 
     // Cross-tenant fs guard — required on every shared shard (Wrapper Impl #6).
