@@ -305,9 +305,12 @@ class OpenClawService {
       }
     }
 
-    // If a specific session key is provided, reset just that one
+    // If a specific session key is provided, reset just that one. Normalize to
+    // the same { success, results: [...] } shape the multi-session path returns
+    // so callers (controller) can always read result.results.length.
     if (sessionKey) {
-      return this._resetSessionByKey(agentId, sessionKey);
+      const result = await this._resetSessionByKey(agentId, sessionKey);
+      return { success: result.success, results: [{ key: sessionKey, ...result }] };
     }
 
     // Otherwise list all sessions and reset any belonging to this agent.
@@ -340,7 +343,9 @@ class OpenClawService {
       results.push({ key, ...result });
     }
 
-    return { success: true, results };
+    // success reflects reality — false if any individual reset failed. Mirrors
+    // the keyed branch above so both paths return the same { success, results }.
+    return { success: results.every((r) => r.success), results };
   }
 
   /**

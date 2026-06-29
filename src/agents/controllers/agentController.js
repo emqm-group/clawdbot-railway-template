@@ -1194,6 +1194,26 @@ export const resetAgentSession = async (req, res) => {
 
     const { sessionKey } = req.body ?? {};
     const result = await openclawService.resetAgentSession(agentId, sessionKey);
+
+    // Surface per-session failures to the orchestrator as a 500 so it knows the
+    // reset did not take effect for this tenant. An empty results set (no active
+    // sessions) is a legitimate success — nothing to reset.
+    if (!result.success) {
+      const failed = result.results.filter((r) => !r.success);
+      const detail =
+        failed.map((r) => `${r.key}: ${r.error}`).join("; ") || "unknown error";
+      logger.error("Reset agent session: one or more resets failed", {
+        agentId,
+        detail,
+      });
+      return res.status(500).json({
+        success: false,
+        agentId,
+        results: result.results,
+        error: `reset failed for ${failed.length} session(s): ${detail}`,
+      });
+    }
+
     return res.json({
       success: true,
       agentId,
