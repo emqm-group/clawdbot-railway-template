@@ -1,0 +1,9 @@
+{
+  "id": "utility-tools",
+  "name": "Utility Tools",
+  "description": "Simple stateless utility helpers (e.g. count_characters) — pure server-side compute with no OAuth, no user approval, and no per-tenant binding.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

@@ -1315,6 +1315,14 @@ async function runAutoSetup() {
   await configManager.ensureContentToolsAlsoAllow();
   console.log("[auto-setup] content-tools plugin config written");
 
+  // Utility tools (simple stateless helpers, e.g. count_characters) — pure
+  // server-side compute, no OAuth/approval/task binding. Defined statically by
+  // the plugin and unlocked at the profile stage via alsoAllow.
+  const utilityPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "utility-tools");
+  await configManager.ensureUtilityToolsPlugin(utilityPluginPath);
+  await configManager.ensureUtilityToolsAlsoAllow();
+  console.log("[auto-setup] utility-tools plugin config written");
+
   // Built-in web_search: profile-stage unlock only (no plugin). Per-agent
   // tools.allow is propagated from base agents (orchestrator side).
   await configManager.ensureWebSearchToolAlsoAllow();
@@ -2493,6 +2501,19 @@ const server = app.listen(PORT, "::", async () => {
       console.log("[wrapper] content-tools plugin config ensured");
     } catch (err) {
       console.warn(`[wrapper] failed to write content-tools plugin config: ${err.message}`);
+      allPluginsWritten = false;
+    }
+
+    // Utility tools (simple stateless helpers, e.g. count_characters). Lands on
+    // existing tenants on redeploy; the plugins-refresh below tells the
+    // orchestrator about it so it isn't wiped on the next PUT.
+    const utilityPluginPath = path.join(APP_ROOT, "src", "openclaw-plugins", "utility-tools");
+    try {
+      await configManager.ensureUtilityToolsPlugin(utilityPluginPath);
+      await configManager.ensureUtilityToolsAlsoAllow();
+      console.log("[wrapper] utility-tools plugin config ensured");
+    } catch (err) {
+      console.warn(`[wrapper] failed to write utility-tools plugin config: ${err.message}`);
       allPluginsWritten = false;
     }
 

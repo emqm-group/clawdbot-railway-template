@@ -755,6 +755,80 @@ class ConfigManager {
   }
 
   /**
+   * Write the utility-tools plugin config block into openclaw.json.
+   * Mirrors ensureContentToolsPlugin — idempotent direct config write.
+   * Serialised via mutex to prevent concurrent read-modify-write races.
+   * @param {string} pluginPath - Absolute path to the plugin directory
+   */
+  ensureUtilityToolsPlugin(pluginPath) {
+    return this._mutex.acquire(() => {
+      const config = this.readConfig();
+
+      const pluginsSection = config.plugins ?? {};
+
+      const currentAllow = pluginsSection.allow ?? [];
+      const allow = currentAllow.includes("utility-tools")
+        ? currentAllow
+        : [...currentAllow, "utility-tools"];
+
+      const currentPaths = pluginsSection.load?.paths ?? [];
+      const paths = currentPaths.includes(pluginPath)
+        ? currentPaths
+        : [...currentPaths, pluginPath];
+
+      const entries = {
+        ...(pluginsSection.entries ?? {}),
+        "utility-tools": {
+          ...(pluginsSection.entries?.["utility-tools"] ?? {}),
+          enabled: true,
+        },
+      };
+
+      const existingInstall = pluginsSection.installs?.["utility-tools"] ?? {};
+      const installs = {
+        ...(pluginsSection.installs ?? {}),
+        "utility-tools": {
+          source: "path",
+          sourcePath: pluginPath,
+          installPath: pluginPath,
+          version: "1.0.0",
+          installedAt: existingInstall.installedAt ?? new Date().toISOString(),
+        },
+      };
+
+      const updated = {
+        ...config,
+        plugins: {
+          ...pluginsSection,
+          allow,
+          load: { ...(pluginsSection.load ?? {}), paths },
+          entries,
+          installs,
+        },
+      };
+
+      this.writeConfig(updated);
+      logger.info("ConfigManager: ensured utility-tools plugin config", { pluginPath });
+    });
+  }
+
+  /**
+   * Add the utility tool names to the global tools.alsoAllow list so agents can
+   * invoke them. Defined statically by the utility-tools plugin (pure stateless
+   * compute — no OAuth, so nothing is pushed via /api/tools/register; baked into
+   * openclaw.json at auto-setup). Plugin tools are not in the coding/messaging
+   * profiles, so this profile-stage unlock is required (per-agent tools.allow is
+   * the actual gate, propagated from base agents orchestrator-side). Idempotent —
+   * skips names already present. Serialised via mutex.
+   */
+  ensureUtilityToolsAlsoAllow() {
+    const UTILITY_TOOLS = [
+      "count_characters",
+    ];
+    return this.patchGlobalToolsAlsoAllow("add", UTILITY_TOOLS);
+  }
+
+  /**
    * Add a binding to route messages to an agent.
    * Serialised via mutex to prevent concurrent read-modify-write races.
    * @param {string} agentId - Agent ID

@@ -15,6 +15,7 @@ import { createNotificationsRouter } from "./api/notifications.js";
 import { createTasksRouter } from "./api/tasks.js";
 import { createDeepLatticeRouter } from "./api/deepLattice.js";
 import { createContentRouter } from "./api/content.js";
+import { createUtilityRouter } from "./api/utility.js";
 import { authMiddleware } from "./agents/middleware/auth.js";
 import logger from "./agents/utils/logger.js";
 import openclawService from "./agents/utils/openclawService.js";
@@ -59,6 +60,11 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
   // /internal/blog). The blog write (draft_blog_post) goes through
   // /api/tools/invoke, not here.
   app.use("/api/content", createContentRouter());
+
+  // Utility proxy — loopback-only, called by the utility-tools plugin inside
+  // gateway. Same shard-secret transport as content/deep-lattice, forwarding the
+  // simple utility-functions group (e.g. count_characters) to /internal/utility.
+  app.use("/api/utility", createUtilityRouter());
 
   /**
    * POST /api/devices/approve
