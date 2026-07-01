@@ -10,6 +10,19 @@ const execAsync = promisify(exec);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Hard caps for the gateway CLI subprocesses so a wedged `openclaw` process can
+// never hang the caller indefinitely (which would permanently wedge the restart
+// mutex in server.js). Values sit just ABOVE openclaw's own internal bounds so
+// we only kill a genuinely-stuck CLI, not a slow-but-progressing one:
+//   - `openclaw gateway health` is bounded by the ~30s gateway RPC timeout.
+//   - `openclaw gateway restart` waits up to 60s internally for health
+//     (DEFAULT_RESTART_HEALTH_TIMEOUT_MS in openclaw v2026.3.8), on top of the
+//     gateway's 30s drain + 5s shutdown.
+// On expiry, exec kills the child (SIGKILL) and rejects, so the caller's
+// `.finally` runs and the mutex self-heals.
+const GATEWAY_HEALTH_EXEC_TIMEOUT_MS = 45_000;
+const GATEWAY_RESTART_EXEC_TIMEOUT_MS = 90_000;
+
 // Match gateway-down / mid-restart errors. The CLI surfaces these in stderr
 // (or sometimes stdout) as:
 //   - "ECONNREFUSED"            — port not yet bound
@@ -397,9 +410,38 @@ class OpenClawService {
   }
 
   /**
-   * Restart the openclaw gateway.
+   * Restart the openclaw gateway using openclaw's native restart command.
+   *
+   * Runs on the shard (not locally) — same as the `openclaw gateway call`
+   * commands this service already shells out to. For our unmanaged foreground
+   * gateway, `openclaw gateway restart` finds the gateway on its port, sends it
+   * SIGUSR1, and waits for the port to become healthy before returning. With
+   * OPENCLAW_NO_RESPAWN=1 on the gateway child, that SIGUSR1 is an in-process
+   * restart (same PID, same port) — no port/lock handoff, so no GatewayLockError.
+   *
+   * Throws on failure (gateway not reachable, command non-zero) so the caller
+   * can surface a real error instead of a false success.
+   *
    * @returns {Promise<{ success: boolean, details: string }>}
    */
+  async restartGatewayViaCli() {
+    const command = `openclaw gateway restart`;
+    logger.command(command);
+    try {
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: GATEWAY_RESTART_EXEC_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      });
+      const details = (stdout || stderr || "").trim();
+      logger.info("gateway restart: completed via openclaw gateway restart");
+      return { success: true, details };
+    } catch (error) {
+      const details = (error.stderr || error.stdout || error.message || "").trim();
+      logger.error("gateway restart failed", { details });
+      throw { statusCode: 500, message: details || "Failed to restart gateway" };
+    }
+  }
+
   /**
    * Validate an openclaw.json config object before writing.
    * Writes to a temp file and runs `openclaw config validate` against it.
@@ -433,7 +475,10 @@ class OpenClawService {
     try {
       const command = `openclaw gateway health`;
       logger.command(command);
-      const { stdout, stderr } = await execAsync(command);
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: GATEWAY_HEALTH_EXEC_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      });
       const details = (stdout || stderr || "").trim();
       return { healthy: true, details };
     } catch (error) {

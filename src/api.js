@@ -116,8 +116,22 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
       await restartGateway();
       return res.json({ success: true });
     } catch (error) {
-      logger.error("Gateway restart endpoint failed", error);
-      return res.status(500).json({ error: error.message || "Failed to restart gateway" });
+      // Honor an explicit statusCode (e.g. 409 not-configured, 503 not-ready
+      // retryable) so the orchestrator can tell "retry shortly" from a real
+      // failure, instead of always seeing a blanket 500.
+      const status = error.statusCode || 500;
+      if (status >= 500) {
+        logger.error("Gateway restart endpoint failed", error);
+      } else {
+        // details carries the underlying health-probe output — log it (it is not
+        // returned to the caller) so a shard stuck returning 503 is debuggable.
+        logger.warn("Gateway restart not performed", {
+          status,
+          message: error.message,
+          details: error.details,
+        });
+      }
+      return res.status(status).json({ error: error.message || "Failed to restart gateway" });
     }
   });
 

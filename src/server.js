@@ -234,6 +234,15 @@ async function startGateway() {
     env: {
       ...process.env,
       OPENCLAW_STATE_DIR: STATE_DIR,
+      // Keep restarts in-process (same PID, same port). Without this, openclaw
+      // responds to a restart by spawning a fresh *detached* gateway and exiting
+      // the old one — which orphans our gatewayProc handle and re-introduces the
+      // port/lock race. With it, `openclaw gateway restart` (SIGUSR1) restarts
+      // the gateway inside this same child process. See gateway-stability design.
+      OPENCLAW_NO_RESPAWN: "1",
+      // We own the gateway lifecycle; stop `doctor` from installing a competing
+      // service unit.
+      OPENCLAW_SERVICE_REPAIR_POLICY: "external",
     },
   });
 
@@ -307,6 +316,107 @@ async function restartGateway() {
     gatewayProc = null;
   }
   return ensureGatewayRunning();
+}
+
+// --- Orchestrator-facing gateway restart (Phase 1: reliable restart) ---------
+//
+// Used by the orchestrator endpoints (/api/gateway/restart, directive pushes,
+// tool registration). The setup page keeps using restartGateway() above.
+//
+// Instead of kill-and-respawn (which races the port/lock handoff), this defers
+// to openclaw's native `openclaw gateway restart`: with OPENCLAW_NO_RESPAWN=1
+// set on the gateway child, that does an in-process restart (same PID, same
+// port — no handoff, no GatewayLockError) and waits for the gateway to be
+// healthy before returning.
+//
+// Concurrency is mutual exclusion, NOT idempotency: only one restart runs at a
+// time. A request that arrives while a restart is in flight queues exactly ONE
+// trailing restart, so a config/directive write that lands mid-restart (e.g. an
+// admin pushing directive A then B in quick succession) is always picked up by a
+// restart that started *after* it — see gateway-stability design doc.
+let _gwRestartCurrent = null; // Promise | null — the in-flight restart
+let _gwRestartTrailing = null; // Promise | null — the single queued follow-up
+
+async function _doGatewayRestartOnce() {
+  // Decide on actual readiness, NOT mere process existence. A child process can
+  // be spawned-but-not-listening for ~20s at boot, or alive-but-wedged — in both
+  // cases `openclaw gateway restart` has no healthy gateway to signal. Never fire
+  // a doomed restart or report success when we didn't actually restart.
+
+  // (1) Not configured → nothing to restart (409, not retryable).
+  if (!isConfigured()) {
+    throw { statusCode: 409, message: "gateway not configured; nothing to restart" };
+  }
+
+  // (2) Not running at all → start it. A fresh start loads current config, so no
+  // restart is needed. NOT fire-and-forget: honor ensureGatewayRunning()'s result
+  // AND confirm the gateway actually comes up serving before reporting success —
+  // a healthy gateway is load-bearing for the whole shard.
+  if (!gatewayProc) {
+    const started = await ensureGatewayRunning();
+    if (!started || started.ok === false) {
+      throw {
+        statusCode: 503,
+        message: `gateway could not be started${started?.reason ? ` (${started.reason})` : ""}; retry shortly`,
+      };
+    }
+    await _assertGatewayServing("gateway started but not yet serving");
+    return { ok: true, action: "started" };
+  }
+
+  // (3 vs 4) Process exists — confirm the gateway is actually SERVING before we
+  // restart it. pollGatewayHealth() retries a few times so a single transient
+  // blip on a busy gateway doesn't produce a false "not ready". A real RPC answer
+  // is the true signal; the process merely existing is not.
+  const pre = await openclawService.pollGatewayHealth();
+  if (!pre.healthy) {
+    // (4) Running but not serving (booting / wedged) → retryable 503. We do NOT
+    // fire a restart against a non-serving gateway, nor fake success; the
+    // orchestrator backs off and retries once it's healthy.
+    throw { statusCode: 503, message: "gateway not ready; retry shortly", details: pre.details };
+  }
+
+  // (3) Running and serving → openclaw's native in-process restart (SIGUSR1 +
+  // health-wait). No retry / no kill-and-respawn fallback (that would reintroduce
+  // the race); a hard CLI failure surfaces as 500.
+  await openclawService.restartGatewayViaCli();
+
+  // NOT fire-and-forget: confirm the restart produced a serving gateway (a real
+  // RPC answer) before reporting success. This also closes the "port up but WS
+  // handlers not yet attached" gap — the restart CLI only waits on the port.
+  await _assertGatewayServing("gateway did not return to healthy after restart");
+  return { ok: true, action: "restarted" };
+}
+
+// Confirm the gateway answers a real health RPC (retried), else throw a retryable
+// 503. Used to make start/restart non-fire-and-forget: we never report success
+// until we've observed the gateway actually serving.
+async function _assertGatewayServing(failMessage) {
+  const health = await openclawService.pollGatewayHealth();
+  if (!health.healthy) {
+    throw { statusCode: 503, message: `${failMessage}; retry shortly`, details: health.details };
+  }
+}
+
+function restartGatewayViaCli() {
+  // No restart running → start one now. Clear the slot when it settles.
+  if (!_gwRestartCurrent) {
+    _gwRestartCurrent = _doGatewayRestartOnce().finally(() => {
+      _gwRestartCurrent = null;
+    });
+    return _gwRestartCurrent;
+  }
+  // A restart is in flight → ensure exactly one trailing restart is queued.
+  // Any number of mid-restart calls collapse onto this single follow-up.
+  if (!_gwRestartTrailing) {
+    _gwRestartTrailing = _gwRestartCurrent
+      .catch(() => {}) // run the trailing restart even if the current one failed
+      .then(() => {
+        _gwRestartTrailing = null;
+        return restartGatewayViaCli(); // re-enter — starts a fresh current
+      });
+  }
+  return _gwRestartTrailing;
 }
 
 // ensureGatewayRunning returns immediately when gatewayProc is set, even if
@@ -2235,7 +2345,10 @@ app.use("/internal", internalRouter);
 // Completely isolated from gateway proxy - registered at app root.
 // All inbound /api/* routes verify the single per-shard OPENCLAW_GATEWAY_TOKEN
 // (Decision #8 / Wrapper Impl #2).
-setupApiRoutes(app, OPENCLAW_GATEWAY_TOKEN, restartGateway, ensureGatewayRunning);
+// Orchestrator-facing endpoints (/api/gateway/restart, directives, tools) use
+// the native, race-free restart with mutual exclusion. The setup page keeps the
+// legacy restartGateway() (kill-and-respawn) — see gateway-stability design.
+setupApiRoutes(app, OPENCLAW_GATEWAY_TOKEN, restartGatewayViaCli, ensureGatewayRunning);
 
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
