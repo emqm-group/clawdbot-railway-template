@@ -103,10 +103,6 @@ export function loadFromOrchestrator() {
   return inflightLoad;
 }
 
-export function getTenantIdSync(agentId) {
-  return cache.get(agentId) ?? null;
-}
-
 // Async lookup. Cache miss triggers a single-flight re-fetch; concurrent
 // misses for the same (or different) agentIds share one in-flight request.
 // Returns null if the agentId is still unknown after the re-fetch — caller

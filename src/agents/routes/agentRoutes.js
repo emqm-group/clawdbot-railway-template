@@ -3,8 +3,6 @@ import * as agentController from "../controllers/agentController.js";
 
 const router = express.Router();
 
-console.log("AGENT ROUTES FILE LOADED");
-
 /**
  * POST /api/agents - Create a new agent from a template
  * Body: { templateId: string, configVars: { AGENT_NAME: string, ...placeholderVars } }

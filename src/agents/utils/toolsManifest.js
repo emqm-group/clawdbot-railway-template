@@ -63,10 +63,3 @@ export function applyToolsUpdate(action, tools) {
     toolCount: tools.length,
   });
 }
-
-/**
- * Read all tool entries from the manifest.
- */
-export function getAllTools() {
-  return readManifest().tools;
-}
