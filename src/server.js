@@ -1278,6 +1278,7 @@ async function runAutoSetup() {
     onboardArgs = buildOnboardArgs(payload);
   } catch (err) {
     console.error(`[auto-setup] invalid onboard args: ${String(err)}`);
+    await notifyOrchestrator("failed", `invalid onboard args: ${String(err)}`);
     return;
   }
 
@@ -1818,10 +1819,7 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
       workspaceDir: WORKSPACE_DIR,
       configured: isConfigured(),
       configPathResolved: configPath(),
-      configPathCandidates:
-        typeof resolveConfigCandidates === "function"
-          ? resolveConfigCandidates()
-          : null,
+      configPathCandidates: resolveConfigCandidates(),
       internalGatewayHost: INTERNAL_GATEWAY_HOST,
       internalGatewayPort: INTERNAL_GATEWAY_PORT,
       gatewayTarget: GATEWAY_TARGET,
@@ -2166,10 +2164,7 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
       // ignore
     }
 
-    const candidates =
-      typeof resolveConfigCandidates === "function"
-        ? resolveConfigCandidates()
-        : [configPath()];
+    const candidates = resolveConfigCandidates();
     for (const p of candidates) {
       try {
         fs.rmSync(p, { force: true });

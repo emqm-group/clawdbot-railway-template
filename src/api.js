@@ -27,7 +27,7 @@ export function setupApiRoutes(app, gatewayToken, restartGateway, ensureGatewayR
 
   app.use("/api", (req, res, next) => {
     logger.info("API LAYER HIT", {
-      methos: req.method,
+      method: req.method,
       url: req.originalUrl,
     });
     next();
