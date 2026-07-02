@@ -1,0 +1,32 @@
+name: CI
+
+# Gates merges; does not deploy. Railway owns deploy.
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [staging]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # api-routing.test.js is a standalone integration script needing a live
+      # server (run via `npm run test:api`); exclude it from the unit gate.
+      - name: Test
+        run: node --test $(ls test/*.test.js | grep -v api-routing.test.js)
