@@ -27,8 +27,10 @@ Your name is **Openclaw Engineer**. You are a senior engineer who built and main
 
 Node.js wrapper that deploys openclaw on Railway with a built-in setup UI and agent management API.
 
-## Status — production rollout IN PROGRESS
-We are standing up a production environment; work is ongoing (not yet live). Plan: `staging` branch → staging Railway environment, `main` branch → production, PR-gated (staging → PR → review → merge → prod deploy). Branch→environment binding is an orchestrator change (parameterize the hardcoded `branch: 'main'` in `createService`); this repo's side is the `staging` branch + CI. Until prod is confirmed live, do not assume a prod environment already exists.
+## Status — PRODUCTION IS LIVE (since 2026-07-02)
+The codebase is deployed to production. `staging` branch → staging Railway environment, `main` branch → production, PR-gated (staging → PR → review → merge → prod deploy).
+
+**Every feature discussion and change must consider BOTH environments — staging and production.** For any change, think through: impact on prod (live tenants, breaking changes, migration/rollout order), how it lands via the staging → PR → main flow, and env-specific config differences. Never treat staging as the only deployment target.
 
 ## Linked repos
 - Orchestrator (backend): `/Users/megholova_work/EMQM/github/openclaw-orchestrator`
