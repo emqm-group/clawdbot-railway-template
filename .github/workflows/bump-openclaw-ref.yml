@@ -1,8 +1,11 @@
 name: Bump OpenClaw release ref
 
 on:
-  schedule:
-    - cron: "23 9 * * *" # daily 09:23 UTC
+  # MANUAL-ONLY. Inherited from the upstream template, which bumps OpenClaw on a
+  # daily cron. We deliberately removed the schedule: this is a LIVE production
+  # deployment and OpenClaw version upgrades must be human-decided and reviewed,
+  # never automatic. Trigger from the Actions tab only when you intentionally
+  # want to prepare an upgrade PR.
   workflow_dispatch: {}
 
 permissions:
