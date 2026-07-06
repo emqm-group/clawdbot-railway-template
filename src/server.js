@@ -181,6 +181,47 @@ let lastGatewayExit = null;
 let lastDoctorOutput = null;
 let lastDoctorAt = null;
 
+// --- Phase 2/3: crash detection, self-heal, and orchestrator notification ----
+// Rolling-window crash alarm (think CloudWatch alarm + SNS): timestamps of recent
+// unexpected crashes. When the count within CRASH_LOOP_WINDOW_MS reaches
+// CRASH_LOOP_THRESHOLD we degrade + notify. The window is NEVER reset on recovery
+// (timestamps just age out), so a *flapping* gateway — crash, recover, crash,
+// recover — still trips the alarm, and concurrent crash handlers can't race a
+// reset. A window (not a "consecutive" counter) also catches slow loops where each
+// recovery attempt is spread far apart in time.
+let gatewayCrashTimes = [];
+// True while a crash is outstanding (not yet announced recovered). Drives a single
+// `recovered` notification per crash episode, concurrency-safe.
+let gatewayCrashedSinceRecovered = false;
+// Once the alarm trips we stop auto-recovery entirely (no infinite respawn loop)
+// and require a manual shard restart. A wrapper redeploy resets it.
+let gatewayDegraded = false;
+let lastCrashNotifyAt = 0;
+
+// Crash alarm: >= THRESHOLD crashes within WINDOW → degraded. Tune on real data.
+const CRASH_LOOP_WINDOW_MS = 10 * 60_000; // 10 minutes
+const CRASH_LOOP_THRESHOLD = 3;
+// How long to wait for a post-crash respawn to actually SERVE before concluding
+// it's wedged. ~60s (40 × 1500ms), matching openclaw's own restart health-wait
+// bound — so a merely-slow-to-attach gateway isn't wrongly declared unrecoverable.
+const RECOVERY_HEALTH_ATTEMPTS = 40;
+// Rate-limit `crashed` notifications so a tight crash loop can't spam the
+// orchestrator (the `degraded` escalation always sends).
+const CRASH_NOTIFY_MIN_INTERVAL_MS = 10_000;
+
+// Intent is tagged on the specific gateway process object (`proc.__intentionalStop`),
+// NOT a shared boolean — a shared flag can be consumed by the wrong process's exit
+// (misclassifying a real crash) or stick set (suppressing the next crash).
+function stopGatewayIntentionally(signal = "SIGTERM") {
+  if (!gatewayProc) return;
+  try {
+    gatewayProc.__intentionalStop = true;
+    gatewayProc.kill(signal);
+  } catch {
+    // ignore
+  }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -229,7 +270,7 @@ async function startGateway() {
     OPENCLAW_GATEWAY_TOKEN,
   ];
 
-  gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
+  const proc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
     env: {
       ...process.env,
@@ -245,20 +286,193 @@ async function startGateway() {
       OPENCLAW_SERVICE_REPAIR_POLICY: "external",
     },
   });
+  gatewayProc = proc;
 
-  gatewayProc.on("error", (err) => {
+  proc.on("error", (err) => {
     const msg = `[gateway] spawn error: ${String(err)}`;
     console.error(msg);
     lastGatewayError = msg;
-    gatewayProc = null;
+    if (gatewayProc === proc) gatewayProc = null;
   });
 
-  gatewayProc.on("exit", (code, signal) => {
+  proc.on("exit", (code, signal) => {
     const msg = `[gateway] exited code=${code} signal=${signal}`;
     console.error(msg);
     lastGatewayExit = { code, signal, at: new Date().toISOString() };
-    gatewayProc = null;
+    if (gatewayProc === proc) gatewayProc = null;
+
+    // Intent is tagged on THIS process object, so a crash of a different process
+    // (or a stuck flag) can't be misread — each exit consults its own tag.
+    if (proc.__intentionalStop) {
+      return;
+    }
+    // Unexpected exit → treat as a crash: notify + attempt self-heal.
+    handleGatewayCrash(code, signal).catch((err) =>
+      console.error(`[gateway] crash handler error: ${String(err)}`),
+    );
   });
+}
+
+// Build a human-readable crash reason from the exit code/signal + breadcrumbs.
+function buildCrashReason(code, signal, { likelyOom } = {}) {
+  const parts = [];
+  if (signal) parts.push(`signal=${signal}`);
+  if (code != null) parts.push(`code=${code}`);
+  if (likelyOom) parts.push("SIGKILL/137 — possible OOM (check the shard memory limit) or a deliberate container termination");
+  if (lastGatewayError) parts.push(`lastError=${String(lastGatewayError).slice(0, 300)}`);
+  return parts.join(" ") || "unknown";
+}
+
+// Mark the shard degraded (auto-recovery given up) and page the orchestrator.
+// Only `degraded` escalates to admins (Slack, orchestrator-side). The latch clears
+// only on a wrapper redeploy — a manual shard restart is the recovery lever.
+async function degradeGateway(why, details = {}) {
+  if (gatewayDegraded) return; // idempotent — one escalation (one page) per incident
+  gatewayDegraded = true;
+  console.error(`[gateway] marking degraded: ${why}; manual shard restart required`);
+  const suffix = details.reason ? ` — ${details.reason}` : "";
+  await notifyGatewayEvent("degraded", { ...details, reason: `${why}${suffix}` });
+}
+
+// Handle an unexpected gateway crash: record it, notify the orchestrator, and
+// attempt self-heal by respawning — unless the crash alarm trips (too many crashes
+// in the window) or the respawn can't reach a serving state, in which case we stop
+// and escalate (`degraded`).
+//
+// Recovery is respawn-only. We deliberately do NOT run `openclaw doctor --fix`
+// here: research against v2026.3.8 source (doctor-config-flow.ts,
+// doctor-gateway-daemon-flow.ts) found it (a) rewrites openclaw.json and strips
+// keys it doesn't recognize — clobbering our wrapper-managed config — and (b)
+// cannot restart our foreground child gateway (it only drives systemd/launchd,
+// which we don't run). The port-aware gateway lock self-heals (gateway-lock.ts),
+// so a plain respawn reclaims a crashed gateway's lock on its own. Full findings +
+// sources: `design docs/gateway-stability-design.md` (Phase 2 & 3 self-heal).
+async function handleGatewayCrash(code, signal) {
+  // An unconfigured shard shouldn't be running a gateway at all — ignore its
+  // exits entirely rather than emit an unbalanced `crashed` with no follow-up.
+  if (!isConfigured()) return;
+
+  const likelyOom = signal === "SIGKILL" || code === 137;
+  const reason = buildCrashReason(code, signal, { likelyOom });
+
+  // Rolling-window alarm: count crashes within the window (age old ones out). We
+  // never reset the window on recovery, so flapping (crash→recover→crash…) still
+  // accumulates, and concurrent handlers can't race a reset.
+  const now = Date.now();
+  gatewayCrashTimes = gatewayCrashTimes.filter((t) => now - t < CRASH_LOOP_WINDOW_MS);
+  gatewayCrashTimes.push(now);
+  const crashesInWindow = gatewayCrashTimes.length;
+  gatewayCrashedSinceRecovered = true;
+
+  console.error(
+    `[gateway] unexpected crash (${crashesInWindow} in ${CRASH_LOOP_WINDOW_MS / 60000}min) — ${reason}`,
+  );
+  // Awaited so `crashed` is ordered before a following `degraded`. Best-effort with
+  // a short timeout, so at worst it delays recovery by a few seconds if the
+  // orchestrator is unreachable.
+  await notifyGatewayEvent("crashed", { code, signal, likelyOom, reason, crashesInWindow });
+
+  // Alarm: >= THRESHOLD crashes within the window → stop auto-recovery + escalate.
+  if (crashesInWindow >= CRASH_LOOP_THRESHOLD) {
+    await degradeGateway(
+      `crash alarm: ${crashesInWindow} crashes within ${CRASH_LOOP_WINDOW_MS / 60000}min`,
+      { code, signal, likelyOom, reason, crashesInWindow },
+    );
+    return;
+  }
+
+  // Self-heal: respawn a fresh gateway (race-free — the crashed process has freed
+  // the port, and the lock self-heals) and confirm it is actually SERVING. Poll
+  // generously (~60s): after a restart the port opens before the WS RPC layer
+  // attaches, so a short poll could wrongly declare a slow-but-fine gateway wedged.
+  let serving = false;
+  try {
+    const started = await ensureGatewayRunning();
+    if (started?.ok) {
+      const health = await openclawService.pollGatewayHealth(RECOVERY_HEALTH_ATTEMPTS, 1500);
+      serving = health.healthy;
+    }
+    // started.ok === false means a concurrent handler already degraded — leave
+    // `serving` false; the guard below no-ops via the idempotent degrade.
+  } catch (err) {
+    console.error(`[gateway] auto-respawn after crash failed: ${String(err)}`);
+  }
+
+  if (serving) {
+    // Announce `recovered` once per crash episode (transition), which also dedupes
+    // against a concurrent handler that already recovered this respawn.
+    if (gatewayCrashedSinceRecovered) {
+      gatewayCrashedSinceRecovered = false;
+      console.log("[gateway] auto-recovered after crash");
+      await notifyGatewayEvent("recovered", {});
+    }
+    return;
+  }
+
+  if (gatewayDegraded) return; // a concurrent handler already escalated
+
+  // Respawn came up but won't serve (wedged), or the start threw. Kill any wedged
+  // child (tagged, so its exit isn't counted as a new crash) so it stops holding
+  // the port/memory — an alive-but-wedged process fires no further `exit`, so
+  // without this we'd dead-end — then escalate.
+  stopGatewayIntentionally();
+  await degradeGateway("respawn did not reach a serving state", {
+    code, signal, likelyOom, reason, crashesInWindow,
+  });
+}
+
+// Shared best-effort POST to an orchestrator per-shard endpoint (Bearer auth,
+// bounded timeout). Returns true on a 2xx. Reads ORCHESTRATOR_URL/SECRET/SHARD_ID
+// from env; no-ops (returns false) when any is missing.
+async function postToOrchestrator(pathSuffix, body, { timeoutMs = 5000, tag = "orchestrator" } = {}) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
+  const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
+  const shardId = process.env.SHARD_ID?.trim();
+  if (!orchestratorUrl || !orchestratorSecret || !shardId) {
+    console.warn(`[${tag}] skipping — ORCHESTRATOR_URL/SECRET/SHARD_ID not set`);
+    return false;
+  }
+  const url = `${orchestratorUrl}/internal/shards/${encodeURIComponent(shardId)}/${pathSuffix}`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${orchestratorSecret}`,
+      },
+      body: JSON.stringify({ shardId, ...body }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      const respBody = await res.text().catch(() => "");
+      console.warn(`[${tag}] returned ${res.status}${respBody ? `: ${respBody}` : ""}`);
+    }
+    return res.ok;
+  } catch (err) {
+    console.warn(`[${tag}] failed: ${String(err)}`);
+    return false;
+  }
+}
+
+// POST a gateway lifecycle event to the orchestrator's dedicated endpoint
+// (separate from the provision-callback, which flips shard status). Best-effort.
+// `crashed` events are rate-limited so a tight crash loop can't spam; `recovered`
+// and `degraded` always send.
+async function notifyGatewayEvent(type, details = {}) {
+  if (type === "crashed") {
+    const now = Date.now();
+    if (now - lastCrashNotifyAt < CRASH_NOTIFY_MIN_INTERVAL_MS) {
+      console.warn(`[gateway-event] rate-limited "crashed" notification`);
+      return;
+    }
+    lastCrashNotifyAt = now;
+  }
+  const ok = await postToOrchestrator(
+    "gateway-event",
+    { type, at: new Date().toISOString(), ...details },
+    { tag: `gateway-event ${type}` },
+  );
+  if (ok) console.log(`[gateway-event] notified "${type}"`);
 }
 
 async function runDoctorBestEffort() {
@@ -279,6 +493,12 @@ async function runDoctorBestEffort() {
 
 async function ensureGatewayRunning() {
   if (!isConfigured()) return { ok: false, reason: "not configured" };
+  // Once the crash-loop guard has tripped, stop auto/lazy respawning — a fresh
+  // start would just crash-loop again. Recovery is a manual shard restart (which
+  // reboots this wrapper and clears the flag).
+  if (gatewayDegraded) {
+    return { ok: false, reason: "degraded — auto-recovery exhausted; manual shard restart required" };
+  }
   if (gatewayProc) return { ok: true };
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
@@ -306,11 +526,7 @@ async function ensureGatewayRunning() {
 
 async function restartGateway() {
   if (gatewayProc) {
-    try {
-      gatewayProc.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
+    stopGatewayIntentionally(); // tags this proc so its exit isn't seen as a crash
     // Give it a moment to exit and release the port.
     await sleep(750);
     gatewayProc = null;
@@ -355,9 +571,19 @@ async function _doGatewayRestartOnce() {
   if (!gatewayProc) {
     const started = await ensureGatewayRunning();
     if (!started || started.ok === false) {
+      const startReason = started?.reason || "";
+      // A `degraded` shard is NOT retryable — auto-recovery is exhausted and only
+      // a manual shard restart clears it. Return 409 so the orchestrator escalates
+      // instead of retry-looping (503 "retry shortly" would loop forever).
+      if (startReason.includes("degraded")) {
+        throw {
+          statusCode: 409,
+          message: "gateway degraded — auto-recovery exhausted; manual shard restart required",
+        };
+      }
       throw {
         statusCode: 503,
-        message: `gateway could not be started${started?.reason ? ` (${started.reason})` : ""}; retry shortly`,
+        message: `gateway could not be started${startReason ? ` (${startReason})` : ""}; retry shortly`,
       };
     }
     await _assertGatewayServing("gateway started but not yet serving");
@@ -1114,15 +1340,6 @@ function buildOnboardArgs(payload) {
 }
 
 async function notifyOrchestrator(status, reason) {
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
-  const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
-  const shardId = process.env.SHARD_ID?.trim();
-
-  if (!orchestratorUrl || !orchestratorSecret || !shardId) {
-    console.warn("[auto-setup] skipping orchestrator callback — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or SHARD_ID not set");
-    return;
-  }
-
   // Per Decision #6 step 7, the provision callback body includes the
   // wrapper-injected `plugins` block from openclaw.json so the orchestrator
   // can persist it into shard_openclaw_configs.content and round-trip it
@@ -1137,29 +1354,15 @@ async function notifyOrchestrator(status, reason) {
     }
   }
 
-  const url = `${orchestratorUrl}/internal/shards/${encodeURIComponent(shardId)}/provision-callback`;
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${orchestratorSecret}`,
-      },
-      body: JSON.stringify({
-        shardId,
-        status,
-        ...(reason && { reason }),
-        ...(plugins !== null && { plugins }),
-      }),
-    });
-    if (res.ok) {
-      console.log(`[auto-setup] orchestrator notified: ${status} (shard ${shardId})`);
-    } else {
-      console.warn(`[auto-setup] orchestrator callback returned ${res.status}`);
-    }
-  } catch (err) {
-    console.warn(`[auto-setup] orchestrator callback failed: ${String(err)}`);
-  }
+  const ok = await postToOrchestrator(
+    "provision-callback",
+    { status, ...(reason && { reason }), ...(plugins !== null && { plugins }) },
+    // The provision callback does real synchronous work (it pulls the full config
+    // back from the wrapper), so it can legitimately take longer than the default
+    // event timeout — give it a generous bound rather than the 5s events use.
+    { tag: "auto-setup", timeoutMs: 30_000 },
+  );
+  if (ok) console.log(`[auto-setup] orchestrator notified: ${status}`);
 }
 
 /**
@@ -1173,17 +1376,6 @@ async function notifyOrchestrator(status, reason) {
  * not stall the boot path before the gateway starts.
  */
 async function notifyOrchestratorPluginsRefresh() {
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL?.trim();
-  const orchestratorSecret = process.env.ORCHESTRATOR_SECRET?.trim();
-  const shardId = process.env.SHARD_ID?.trim();
-
-  if (!orchestratorUrl || !orchestratorSecret || !shardId) {
-    console.warn(
-      "[wrapper] skipping plugins refresh — ORCHESTRATOR_URL, ORCHESTRATOR_SECRET, or SHARD_ID not set",
-    );
-    return;
-  }
-
   let plugins;
   try {
     const cfg = configManager.readConfig();
@@ -1198,30 +1390,8 @@ async function notifyOrchestratorPluginsRefresh() {
     return;
   }
 
-  const url = `${orchestratorUrl}/internal/shards/${encodeURIComponent(shardId)}/plugins`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${orchestratorSecret}`,
-      },
-      body: JSON.stringify({ plugins }),
-      signal: controller.signal,
-    });
-    if (res.ok) {
-      console.log(`[wrapper] orchestrator plugins refresh sent (shard ${shardId})`);
-    } else {
-      const body = await res.text().catch(() => "");
-      console.warn(`[wrapper] orchestrator plugins refresh returned ${res.status}: ${body}`);
-    }
-  } catch (err) {
-    console.warn(`[wrapper] orchestrator plugins refresh failed: ${String(err)}`);
-  } finally {
-    clearTimeout(timeout);
-  }
+  const ok = await postToOrchestrator("plugins", { plugins }, { tag: "wrapper plugins-refresh" });
+  if (ok) console.log("[wrapper] orchestrator plugins refresh sent");
 }
 
 /**
@@ -1933,9 +2103,7 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     }
     if (cmd === "gateway.stop") {
       if (gatewayProc) {
-        try {
-          gatewayProc.kill("SIGTERM");
-        } catch {}
+        stopGatewayIntentionally();
         await sleep(750);
         gatewayProc = null;
       }
@@ -2154,9 +2322,7 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
     // Stop gateway to avoid running gateway + onboard concurrently on small Railway instances.
     try {
       if (gatewayProc) {
-        try {
-          gatewayProc.kill("SIGTERM");
-        } catch {}
+        stopGatewayIntentionally();
         await sleep(750);
         gatewayProc = null;
       }
@@ -2282,9 +2448,7 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
 
     // Stop gateway before restore so we don't overwrite live files.
     if (gatewayProc) {
-      try {
-        gatewayProc.kill("SIGTERM");
-      } catch {}
+      stopGatewayIntentionally();
       await sleep(750);
       gatewayProc = null;
     }
@@ -2725,9 +2889,10 @@ server.on("upgrade", async (req, socket, head) => {
 });
 
 process.on("SIGTERM", () => {
-  // Best-effort shutdown
+  // Best-effort shutdown — the whole container is going down, so this gateway
+  // exit is deliberate, not a crash (don't fire crash recovery/notification).
   try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
+    stopGatewayIntentionally();
   } catch {
     // ignore
   }
