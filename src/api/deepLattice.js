@@ -45,6 +45,16 @@ export function createDeepLatticeRouter() {
     return forward(req, res, `/profile/${encodeURIComponent(req.params.slug)}/content`);
   });
 
+  // POST /api/deep-lattice/profile/:slug
+  // → POST /internal/deep-lattice/profile/:slug
+  // Body: { agent_id, content, tenantId }
+  // create_profile_file — CRO authors a generated profile doc during onboarding.
+  // Distinct create verb (vs the PUT update above); idempotent create-or-overwrite
+  // so a task Retry re-authors safely. (onboarding-flow-design.md §4)
+  router.post("/profile/:slug", (req, res) => {
+    return forward(req, res, `/profile/${encodeURIComponent(req.params.slug)}`);
+  });
+
   // GET /api/deep-lattice/knowledge/:filename
   // → GET /internal/deep-lattice/knowledge/:filename?tenantId=&agent_id=
   router.get("/knowledge/:filename", (req, res) => {

@@ -658,6 +658,7 @@ class ConfigManager {
       "read_profile_file",
       "read_knowledge_file",
       "update_profile_file",
+      "create_profile_file",
       "create_briefing",
       "read_briefings",
       // Agent documents (migration 018)
