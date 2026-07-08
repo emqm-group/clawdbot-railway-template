@@ -33,6 +33,23 @@
  *   If the gateway returns UNAVAILABLE / "session is still active", the agent is
  *   mid-turn. The wrapper no longer retries — it logs and gives up. KC's liveness
  *   sweep (Case 3: stuck received_approval) re-nudges via kc:continue.
+ *
+ * baseline_context (provisioning prime — SYNCHRONOUS):
+ *   Fired once per newly-seeded agent by the orchestrator (seedBaseAgents Step 8b),
+ *   after the session reset and before the first task. A fresh agent has no working
+ *   context, so its first task tends to fail; this event makes the agent read its
+ *   core files (AGENTS.md / USER.md / IDENTITY.md) and settle its identity on the
+ *   main session first. Unlike the kc: sentinels, the message IS the full
+ *   initialization prompt — the orchestrator only names the event, the wrapper owns
+ *   the prompt (BASELINE_CONTEXT_PROMPT).
+ *
+ *   CRITICAL: this is the ONE event handled SYNCHRONOUSLY. The orchestrator AWAITs
+ *   the HTTP response as an ordering barrier — Step 9 (the CRO's first task) cannot
+ *   fire until every agent's prime has landed. So the router responds only AFTER the
+ *   prime turn completes (200 landed / 502 failed / 503 gateway-not-ready), never the
+ *   202-then-async path the KC wake events use. A 202 here would make the barrier a
+ *   no-op and re-open the first-task-races-the-prime race. Not coalesced, not queued;
+ *   retried a few times on not-delivered failures (never on a turn that already ran).
  */
 
 import express from "express";
@@ -41,6 +58,28 @@ import logger from "../agents/utils/logger.js";
 
 const GATEWAY_PORT = 18789;
 const GATEWAY_TOKEN = () => process.env.OPENCLAW_GATEWAY_TOKEN?.trim();
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// baseline_context prime prompt.
+// A freshly-seeded agent has no working context, so its very first KC task tends
+// to fail. The orchestrator fires a `baseline_context` event per newly-seeded
+// agent (seedBaseAgents.js Step 8b) right after the session reset and before the
+// first task; the orchestrator only names the event — the wrapper owns the prompt.
+// This turn makes the agent read its core files and settle its identity so the
+// first real task lands on a primed session. Pinned to the agent's main session
+// (see triggerAgent) so the agent "knows itself" in the same transcript tasks use.
+const BASELINE_CONTEXT_PROMPT =
+  "You are an AI agent helping a business automate its functions. You are a part of an organisation of multiple AI agents, each acting independently. This is the beginning of your existence. Your core files - AGENTS.md, USER.md and IDENTITY.md - contain all the information you require to understand yourself fully. The next input (and most inputs after that) you receive will be a task assignment. The details of how to handle those tasks is outlined in AGENTS.md. Read all the files then respond 'OK' to receive the task assignment.";
+
+// Upper bound on a single prime turn. baseline_context is handled synchronously
+// (the orchestrator awaits it), so a wedged gateway or a stalled turn would
+// otherwise hang the orchestrator's Step-8b barrier and stall provisioning
+// forever. This is a best-effort prime — a hang must convert into a failure so
+// the orchestrator can move on, not into an unbounded wait. A "read files +
+// reply OK" turn completes in seconds; this is a generous ceiling for a genuine
+// hang, not a limit on a slow-but-progressing turn.
+const BASELINE_PRIME_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Coalesce map: agentId → timer handle.
@@ -125,10 +164,12 @@ function buildMessage(event) {
   if (event.event === "liveness_check") {
     return "kc:continue";
   }
+  // baseline_context is NOT routed through here — it is handled synchronously in
+  // the router (see POST /tasks) with BASELINE_CONTEXT_PROMPT, never queued.
   return null;
 }
 
-async function triggerAgent(agentId, message) {
+async function triggerAgent(agentId, message, { signal } = {}) {
   const gatewayToken = GATEWAY_TOKEN();
   const url = `http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions`;
   // Canonical per https://docs.openclaw.ai/gateway/openai-http-api — slash, not colon.
@@ -161,6 +202,7 @@ async function triggerAgent(agentId, message) {
       model,
       messages: [{ role: "user", content: message }],
     }),
+    signal,
   });
 
   logger.info(`[KC-NOTIF] triggerAgent ← ${resp.status} in ${Date.now() - startedAt}ms`, {
@@ -247,6 +289,79 @@ async function dispatchLivenessCheck(agentId, message) {
       `[KC-NOTIF] liveness_check trigger error for agent ${agentId}: ${err.message} — dropped; KC will re-ping`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// baseline_context dispatch (provisioning prime) — SYNCHRONOUS.
+//
+// This is NOT fire-and-forget. `triggerAgent` awaits the whole /v1/chat/
+// completions turn, so when this resolves `true` the prime has actually landed
+// in the agent's main session. The router awaits this and only then responds,
+// which is what makes the orchestrator's Step-8b await barrier real: the CRO's
+// first task (Step 9) cannot fire until the prime has landed.
+//
+// Each attempt is time-bounded (BASELINE_PRIME_TIMEOUT_MS) via AbortController.
+// Because this runs synchronously under the orchestrator's barrier, an unbounded
+// turn would stall provisioning; a timeout converts a hang into a failure so the
+// orchestrator can move on (best-effort prime).
+//
+// Retry is scoped to failures that mean the prime NEVER RAN — a fetch reject
+// (never reached the gateway) or an UNAVAILABLE/503/409 (gateway mid-restart,
+// or the agent still busy from the Step-6b session reset). Those requests were
+// rejected, not executed, so re-sending can't produce a duplicate init turn. A
+// non-retriable non-2xx (where the turn may have partially executed) and a
+// TIMEOUT (the turn may still be running gateway-side) are both terminal — we
+// return false rather than risk a second "beginning of your existence" turn.
+//
+// Returns true only if the prime landed.
+// ---------------------------------------------------------------------------
+async function dispatchBaselineContext(agentId, message) {
+  const MAX_ATTEMPTS = 3;
+  const BACKOFF_MS = 1500;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BASELINE_PRIME_TIMEOUT_MS);
+    try {
+      const resp = await triggerAgent(agentId, message, { signal: controller.signal });
+      if (resp.ok) {
+        logger.info(`[KC-NOTIF] baseline_context delivered`, { agentId, attempt });
+        return true;
+      }
+      // isUnavailable clones the body, so the original is still readable below.
+      const retriable = await isUnavailable(resp);
+      const text = await resp.text().catch(() => "");
+      if (!retriable) {
+        // Turn may have partially run — do not re-send.
+        logger.error(
+          `[KC-NOTIF] baseline_context failed (non-retriable) for agent ${agentId} [${resp.status}]: ${text}`
+        );
+        return false;
+      }
+      logger.warn(
+        `[KC-NOTIF] baseline_context not-ready for agent ${agentId} [${resp.status}] (attempt ${attempt}/${MAX_ATTEMPTS}) — will retry`
+      );
+    } catch (err) {
+      if (err?.name === "AbortError" || controller.signal.aborted) {
+        // Timed out — the turn may still be running gateway-side, so don't
+        // re-send. Fail now so the orchestrator moves on (best-effort).
+        logger.error(
+          `[KC-NOTIF] baseline_context timed out after ${BASELINE_PRIME_TIMEOUT_MS}ms for agent ${agentId} — giving up`
+        );
+        return false;
+      }
+      // fetch rejected before a response — never reached the gateway, safe to retry.
+      logger.warn(
+        `[KC-NOTIF] baseline_context trigger error for agent ${agentId} (attempt ${attempt}/${MAX_ATTEMPTS}): ${err.message} — will retry`
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt < MAX_ATTEMPTS) await sleep(BACKOFF_MS);
+  }
+  logger.error(
+    `[KC-NOTIF] baseline_context gave up after ${MAX_ATTEMPTS} attempts for agent ${agentId} — first task may land on an un-primed session`
+  );
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,8 +566,11 @@ export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
    *   { event: "task_assigned",     agentId, taskId }
    *   { event: "approval_actioned", agentId, taskId }
    *   { event: "liveness_check",    agentId }            → kc:continue
+   *   { event: "baseline_context",  agentId }            → provisioning prime (sync)
    *
-   * Responds immediately (202) — agent triggering is async.
+   * Responds 202 immediately for KC wake events (agent triggering is async).
+   * baseline_context is the exception: responds synchronously (200/502/503) only
+   * after the prime turn lands, since the orchestrator awaits it as a barrier.
    */
   router.post("/tasks", (req, res, next) => {
     logger.info(`[KC-NOTIF] POST /api/notifications/tasks received`, {
@@ -471,7 +589,7 @@ export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
       return res.status(400).json({ error: "event and agentId are required" });
     }
 
-    const VALID_EVENTS = new Set(["tasks_available", "task_assigned", "approval_actioned", "liveness_check"]);
+    const VALID_EVENTS = new Set(["tasks_available", "task_assigned", "approval_actioned", "liveness_check", "baseline_context"]);
     if (!VALID_EVENTS.has(event)) {
       logger.warn(`[KC-NOTIF] validation failed: unknown event type`, { event, agentId });
       return res.status(400).json({ error: `Unknown event type: ${event}` });
@@ -485,6 +603,41 @@ export function createNotificationsRouter(gatewayToken, ensureGatewayRunning) {
     if (event === "task_assigned" && !taskId) {
       logger.warn(`[KC-NOTIF] validation failed: task_assigned missing taskId`, { agentId });
       return res.status(400).json({ error: "task_assigned requires taskId" });
+    }
+
+    // baseline_context is a SYNCHRONOUS provisioning barrier — the orchestrator
+    // (seedBaseAgents Step 8b) AWAITs this response before firing the first task
+    // (Step 9). We must respond only AFTER the prime turn has landed in the
+    // agent's session, so we do NOT take the 202-then-async path below. A 202
+    // here would make the orchestrator's await barrier a no-op and re-open the
+    // first-task-races-the-prime bug the barrier exists to prevent.
+    if (event === "baseline_context") {
+      logger.info(`[KC-NOTIF] baseline_context (synchronous prime) received`, { agentId });
+
+      // Ensure the gateway is up before priming. Not-ready → 503 so the
+      // orchestrator can tell "retry shortly" from a real delivery failure.
+      let gatewayReady = false;
+      let gatewayErr = null;
+      try {
+        const result = await ensureGatewayRunning();
+        gatewayReady = result?.ok === true;
+        if (!gatewayReady) gatewayErr = result?.reason ?? "unknown";
+      } catch (err) {
+        gatewayErr = err?.message ?? String(err);
+      }
+
+      if (!gatewayReady) {
+        logger.warn(`[KC-NOTIF] baseline_context: gateway not ready`, { agentId, reason: gatewayErr });
+        return res.status(503).json({ ok: false, error: `gateway not ready: ${gatewayErr}` });
+      }
+
+      const delivered = await dispatchBaselineContext(agentId, BASELINE_CONTEXT_PROMPT);
+      if (delivered) {
+        logger.info(`[KC-NOTIF] baseline_context prime landed — responding 200`, { agentId });
+        return res.status(200).json({ ok: true });
+      }
+      logger.error(`[KC-NOTIF] baseline_context prime failed — responding 502`, { agentId });
+      return res.status(502).json({ ok: false, error: "baseline_context delivery failed" });
     }
 
     // Respond immediately — agent triggering is async.
