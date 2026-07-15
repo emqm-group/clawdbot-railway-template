@@ -24,6 +24,11 @@ import {
 import logger from "./agents/utils/logger.js";
 import configManager from "./agents/utils/configManager.js";
 import openclawService from "./agents/utils/openclawService.js";
+import {
+  isPluginReloadPending,
+  currentManifestVersion,
+  markPluginRegistryLoaded,
+} from "./agents/utils/pluginReloadState.js";
 import { buildModelPricingProviders } from "./config/modelPricing.js";
 
 const internalRouter = createInternalRouter();
@@ -504,11 +509,21 @@ async function ensureGatewayRunning() {
     gatewayStarting = (async () => {
       try {
         lastGatewayError = null;
+        // Capture the manifest version BEFORE the fresh process reads it at boot.
+        // Crediting only this (a lower bound) keeps a write that lands mid-boot
+        // still owed — see pluginReloadState.
+        const bootVersion = currentManifestVersion();
         await startGateway();
         const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
         if (!ready) {
           throw new Error("Gateway did not become ready in time");
         }
+        // A fresh gateway process just loaded the on-disk tools manifest during
+        // its startup, so record the loaded manifest version. This is the single
+        // choke point every full boot passes through (initial, lazy, restart
+        // respawn, crash recovery); in-process SIGUSR1 restarts bypass it and
+        // correctly leave loadedVersion behind (they reuse the cached registry).
+        markPluginRegistryLoaded(bootVersion);
       } catch (err) {
         const msg = `[gateway] start failure: ${String(err)}`;
         lastGatewayError = msg;
@@ -602,7 +617,23 @@ async function _doGatewayRestartOnce() {
     throw { statusCode: 503, message: "gateway not ready; retry shortly", details: pre.details };
   }
 
-  // (3) Running and serving → openclaw's native in-process restart (SIGUSR1 +
+  // (3) Running and serving. Choose the restart mode by WHAT changed:
+  //  - Unloaded tools-manifest change pending → FULL respawn (only a fresh process
+  //    rebuilds openclaw's per-process plugin registry; see pluginReloadState.js
+  //    for the registryCache rationale and the version model).
+  //  - Otherwise (config/directive-only change) → in-process restart, which avoids
+  //    the port/lock handoff race.
+  if (isPluginReloadPending()) {
+    // Full kill-and-respawn. restartGateway() → ensureGatewayRunning() records the
+    // loaded manifest version only on a serving boot, so a write that lands
+    // mid-respawn stays owed and the trailing restart respawns again (no lost
+    // update); a failed respawn also leaves it owed and is retried.
+    await restartGateway();
+    await _assertGatewayServing("gateway did not return to healthy after plugin-reload respawn");
+    return { ok: true, action: "restarted", pluginReload: true };
+  }
+
+  // Config/directive-only change → openclaw's native in-process restart (SIGUSR1 +
   // health-wait). No retry / no kill-and-respawn fallback (that would reintroduce
   // the race); a hard CLI failure surfaces as 500.
   await openclawService.restartGatewayViaCli();
