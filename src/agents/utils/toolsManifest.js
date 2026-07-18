@@ -42,24 +42,43 @@ function writeManifest(manifest) {
  *
  * @param {"add"|"remove"} action
  * @param {object[]} tools - array of { name, description, parameters }
+ * @returns {boolean} true if the manifest CONTENT changed on disk (a new or
+ *   modified tool entry was written); false for a no-op (remove, or an
+ *   idempotent re-add of already-identical entries). Callers use this to decide
+ *   whether a full gateway respawn is actually required.
  */
 export function applyToolsUpdate(action, tools) {
-  if (action !== "add") return;
+  if (action !== "add") return false;
 
   const manifest = readManifest();
+  // Key by tool name; Map.set on an existing key updates the value in place
+  // (keeps insertion order), so an identical re-add does not reorder the list.
+  const byName = new Map((manifest.tools ?? []).map((t) => [t.name, t]));
 
+  let changed = false;
   for (const tool of tools) {
-    manifest.tools = manifest.tools.filter((t) => t.name !== tool.name);
-    manifest.tools.push({
+    const entry = {
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
-    });
+    };
+    const prev = byName.get(tool.name);
+    // New tool, or an existing tool whose definition differs → real change.
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(entry)) {
+      changed = true;
+    }
+    byName.set(tool.name, entry);
   }
 
+  // Idempotent re-register of already-identical tools → skip the write so the
+  // caller can keep the cheap in-process restart instead of a full respawn.
+  if (!changed) return false;
+
+  manifest.tools = Array.from(byName.values());
   writeManifest(manifest);
   logger.info("toolsManifest: manifest updated", {
     action,
     toolCount: tools.length,
   });
+  return true;
 }

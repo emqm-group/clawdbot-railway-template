@@ -1,5 +1,6 @@
 import logger from "../utils/logger.js";
 import { applyToolsUpdate } from "../utils/toolsManifest.js";
+import { bumpManifestVersion } from "../utils/pluginReloadState.js";
 import configManager from "../utils/configManager.js";
 import { getTenantId } from "../utils/tenantMappings.js";
 
@@ -66,11 +67,25 @@ export async function register(req, res, restartGateway) {
   }
   const shouldRestart = restart !== false;
 
+  let manifestChanged = false;
   try {
-    applyToolsUpdate(action, tools);
+    manifestChanged = applyToolsUpdate(action, tools);
   } catch (err) {
     logger.error("toolsController.register: manifest update failed", { error: err.message });
     return res.status(500).json({ error: "Failed to update tools manifest" });
+  }
+
+  // A manifest CONTENT change only takes effect after a FULL gateway respawn:
+  // openclaw caches the plugin registry per-process keyed on the plugins config —
+  // NOT on tools-manifest.json (src/plugins/loader.ts `registryCache`), so an
+  // in-process restart returns the stale boot-time registry and the new tools
+  // never get an executor. Bump the manifest version so the restart path (this
+  // call when restart !== false, or the orchestrator's trailing
+  // POST /api/gateway/restart on a batch) upgrades to a full respawn. A no-op
+  // update (remove, or an idempotent re-register of identical tools) does NOT
+  // bump — it stays on the cheap in-process restart.
+  if (manifestChanged) {
+    bumpManifestVersion();
   }
 
   // Patch the agent's tools.allow in openclaw.json before restarting the gateway.

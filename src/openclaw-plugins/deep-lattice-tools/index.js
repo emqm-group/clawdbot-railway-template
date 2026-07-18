@@ -1,7 +1,7 @@
 // Deep Lattice Tools plugin.
-// Registers 14 tools that expose Deep Lattice file access to agents:
+// Registers 15 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
-//     update_profile_file.
+//     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
 //   Briefings: create_briefing, read_briefings.
 //   Agent documents (migration 018): create_analytics_report,
@@ -33,7 +33,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 14 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 15 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -213,6 +213,48 @@ export default function register(api) {
         return okResult({ ok: true });
       } catch (err) {
         logError("update_profile_file", err.message, { agentId, slug });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // create_profile_file — authors one profile slug (create-or-overwrite). The CRO
+  // calls this once per generated slug during onboarding to write the profile docs
+  // from the profile task's JSON request (onboarding-flow-design.md §4). Distinct
+  // create verb from update_profile_file (keeps the agent-facing language
+  // unambiguous); idempotent so a single-task Retry re-authors already-written docs.
+  api.registerTool((ctx) => ({
+    name: "create_profile_file",
+    description:
+      "Create (or overwrite) the full markdown content of one Profile slug. Idempotent create-or-overwrite — safe to re-call. Used by the CRO to author the generated profile docs during onboarding.",
+    parameters: {
+      type: "object",
+      required: ["slug", "content"],
+      additionalProperties: false,
+      properties: {
+        slug: {
+          type: "string",
+          enum: ["company-founder", "products", "market-competitors", "pricing", "icp"],
+        },
+        content: {
+          type: "string",
+          description: "Full markdown content for the slug.",
+        },
+      },
+    },
+    async execute(_toolCallId, { slug, content }) {
+      const agentId = ctx.agentId;
+      log("create_profile_file", "called", { agentId, slug, contentLength: content?.length ?? 0 });
+      try {
+        await callWrapper(
+          "POST",
+          `/profile/${encodeURIComponent(slug)}`,
+          { agentId, content }
+        );
+        log("create_profile_file", "success", { agentId, slug });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("create_profile_file", err.message, { agentId, slug });
         return errorResult(err.message);
       }
     },
