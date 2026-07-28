@@ -1591,6 +1591,16 @@ async function runAutoSetup() {
   ]));
   console.log("[auto-setup] heartbeat disabled (agents.defaults.heartbeat.every=0m)");
 
+  // Default thinking level for every agent. Bare string per openclaw's schema
+  // (agents.defaults.thinkingDefault). Uniform across all tenants — not env-driven
+  // — so it ships to staging and prod via the normal branch flow, no orchestrator
+  // env plumbing required.
+  await runCmd(OPENCLAW_NODE, clawArgs([
+    "config", "set", "--json", "agents.defaults.thinkingDefault",
+    JSON.stringify("medium"),
+  ]));
+  console.log("[auto-setup] default thinking level set (agents.defaults.thinkingDefault=medium)");
+
   // Enable /v1/responses HTTP endpoint (required for webchat)
   await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "gateway.http.endpoints.responses.enabled", "true"]));
   console.log("[auto-setup] gateway.http.endpoints.responses.enabled set to true");
