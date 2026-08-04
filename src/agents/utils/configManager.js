@@ -661,6 +661,10 @@ class ConfigManager {
       "create_profile_file",
       "create_briefing",
       "read_briefings",
+      // Founder's Style (migration 010) — read composes both sections; the
+      // write targets the `published` section only.
+      "read_founder_style",
+      "update_published_style",
       // Agent documents (migration 018)
       "create_analytics_report",
       "read_analytics_reports",

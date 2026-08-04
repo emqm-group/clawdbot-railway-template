@@ -1,8 +1,10 @@
 // Deep Lattice Tools plugin.
-// Registers 15 tools that expose Deep Lattice file access to agents:
+// Registers 17 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
+//   Founder's Style (migration 010): read_founder_style (both sections
+//     composed), update_published_style (published section only).
 //   Briefings: create_briefing, read_briefings.
 //   Agent documents (migration 018): create_analytics_report,
 //     read_analytics_reports, create_plan, read_latest_plan,
@@ -33,7 +35,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 15 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 17 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -50,7 +52,12 @@ function logError(tool, msg, meta) {
   console.error(`[DL-TOOLS] [${tool}] ERROR: ${msg}${metaStr}`);
 }
 
-async function callWrapper(method, path, body, { notFoundOk = false } = {}) {
+// `notFoundOk` maps a 404 to null for reads where "none exists yet" is a normal
+// state. `notFoundCode` narrows that to one orchestrator error code — without it
+// the wrapper's own 404s (unknown_agent) and a missing orchestrator route are
+// indistinguishable from an empty document, and the agent silently proceeds as
+// if the tenant had written nothing.
+async function callWrapper(method, path, body, { notFoundOk = false, notFoundCode } = {}) {
   const url = `${BASE_URL}${path}`;
   const opts = {
     method,
@@ -60,11 +67,10 @@ async function callWrapper(method, path, body, { notFoundOk = false } = {}) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(url, opts);
-  // For latest-wins reads, "none exists yet" is a normal state, not an error.
-  if (res.status === 404 && notFoundOk) {
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404 && notFoundOk && (!notFoundCode || data.code === notFoundCode)) {
     return null;
   }
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(
       `Deep Lattice tool error [${res.status}]: ${data.error ?? data.message ?? JSON.stringify(data)}`
@@ -255,6 +261,73 @@ export default function register(api) {
         return okResult({ ok: true });
       } catch (err) {
         logError("create_profile_file", err.message, { agentId, slug });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Founder's Style (migration 010) ────────────────────────
+  // One document with two sections orchestrator-side: `intended` (the founder's
+  // own words, founder-written) and `published` (inferred from their published
+  // posts, agent-written). The read returns both composed into one markdown doc;
+  // the write targets the `published` section only — there is no agent-facing
+  // path to `intended`, by tool name and by route.
+
+  // read_founder_style — the voice read before drafting. 404 orchestrator-side
+  // means "nothing captured yet", which is a normal state, not an error.
+  api.registerTool((ctx) => ({
+    name: "read_founder_style",
+    description:
+      "Read the tenant's Founder's Style document — how the founder writes. Returns both sections composed into one markdown document under the headings \"Founder's Intended Style\" (the founder's own words) and \"Founder's Published Style\" (inferred from their published posts). Read this before drafting so the output sounds like the founder. This is a read-only view for drafting — never pass this output back to update_published_style, which takes the published section's body alone. Takes no arguments. Returns { content }, where content is null if no founder style has been captured yet.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_founder_style", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        // Only the orchestrator's own "nothing written yet" 404 counts as empty.
+        // Any other 404 (unknown agent, route missing) must surface as an error —
+        // silently drafting in a generic voice is worse than a visible failure.
+        const data = await callWrapper("GET", `/founder-style?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "founder_style_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_founder_style", "success", { agentId, contentLength: content?.length ?? 0 });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_founder_style", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // update_published_style — writes the `published` section only. Latest wins;
+  // the founder's `intended` section is never read or touched by this call.
+  api.registerTool((ctx) => ({
+    name: "update_published_style",
+    description:
+      "Replace the Published Style section of the tenant's Founder's Style document — your inference of how the founder actually writes, drawn from reviewing their published posts. Pass the body of that section ONLY: no \"Founder's Published Style\" heading, and never the intended-style section. The supplied content replaces the published section entirely (latest wins) and is stored separately from the founder's intended style, which is their own and cannot be changed from here — so do not echo back what read_founder_style returned.",
+    parameters: {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          description: "Full new markdown content for the published style section.",
+        },
+      },
+    },
+    async execute(_toolCallId, { content }) {
+      const agentId = ctx.agentId;
+      log("update_published_style", "called", { agentId, contentLength: content?.length ?? 0 });
+      try {
+        await callWrapper("PUT", "/founder-style/published/content", { agentId, content });
+        log("update_published_style", "success", { agentId });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("update_published_style", err.message, { agentId });
         return errorResult(err.message);
       }
     },

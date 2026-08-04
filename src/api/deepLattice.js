@@ -55,6 +55,26 @@ export function createDeepLatticeRouter() {
     return forward(req, res, `/profile/${encodeURIComponent(req.params.slug)}`);
   });
 
+  // ── Founder's Style (migration 010) ────────────────────────
+  // One document, two sections stored as two blobs orchestrator-side. The GET
+  // returns them composed into a single markdown doc (404 when nothing has been
+  // written yet). The PUT writes the `published` section ONLY — `published` is a
+  // fixed path segment, not a param: the founder's `intended` section is their
+  // own words and has no agent-facing write path.
+
+  // GET /api/deep-lattice/founder-style?agentId=
+  // → GET /internal/deep-lattice/founder-style?tenantId=&agent_id=
+  router.get("/founder-style", (req, res) => {
+    return forward(req, res, "/founder-style");
+  });
+
+  // PUT /api/deep-lattice/founder-style/published/content
+  // → PUT /internal/deep-lattice/founder-style/published/content
+  // Body: { agent_id, content, tenantId }
+  router.put("/founder-style/published/content", (req, res) => {
+    return forward(req, res, "/founder-style/published/content");
+  });
+
   // GET /api/deep-lattice/knowledge/:filename
   // → GET /internal/deep-lattice/knowledge/:filename?tenantId=&agent_id=
   router.get("/knowledge/:filename", (req, res) => {
