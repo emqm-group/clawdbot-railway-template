@@ -672,6 +672,9 @@ class ConfigManager {
       "read_latest_plan",
       "create_daily_target",
       "read_latest_daily_target",
+      // Daily-target composite (migration 012) — orchestrator-maintained
+      // collated history; read-only, so there is no create_* counterpart.
+      "read_daily_target_composite",
       "create_execution_plan",
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only

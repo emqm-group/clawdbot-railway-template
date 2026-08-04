@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 17 tools that expose Deep Lattice file access to agents:
+// Registers 18 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -10,6 +10,8 @@
 //     read_analytics_reports, create_plan, read_latest_plan,
 //     create_daily_target, read_latest_daily_target, create_execution_plan,
 //     read_latest_execution_plan.
+//   Daily-target composite (migration 012): read_daily_target_composite
+//     (read-only — orchestrator-maintained).
 //
 // No profile/knowledge list/discovery tools — agent directives reference
 // specific profile slugs and knowledge filenames by name. create_briefing
@@ -17,7 +19,9 @@
 // date. Agent documents are agent-authored working docs: analytics reports are
 // typed + filterable; plan is subtyped (gtm | content-strategy |
 // outbound-strategy) and latest-wins per subtype; daily_target / execution_plan
-// are untyped latest-wins.
+// are untyped latest-wins. The daily-target composite is the one document no
+// agent writes — the orchestrator rebuilds it from each daily_target write, so
+// it has a read tool and no create tool.
 //
 // NOTE: agent-level authorization has been removed orchestrator-side — there
 // is no longer a per-agent gate (no assertCanPerform). Any agent that has the
@@ -35,7 +39,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 17 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 18 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -663,4 +667,38 @@ export default function register(api) {
       },
     }));
   }
+
+  // read_daily_target_composite — the collated daily-target composite
+  // (migration 012): every day's plan table stacked into ONE file, newest day
+  // first, with a Date column prepended. READ ONLY by design — the orchestrator
+  // rebuilds the file on every create_daily_target write, so there is
+  // deliberately no matching create_* tool. Its 404 code is the same
+  // `document_not_found` the latest-wins reads use; gating on it keeps the
+  // wrapper's own 404s (unknown_agent) from reading as "no history yet".
+  api.registerTool((ctx) => ({
+    name: "read_daily_target_composite",
+    description:
+      "Read the collated history of daily targets — every day's plan table stacked into one markdown file, newest day first, with a Date column prepended to each row. Read this before choosing today's plan so you can see what you already covered on previous days. Takes no arguments. Returns { content }, where content is null if no daily target has been written yet. Read-only: this file is maintained automatically from each daily target you create, so never try to write it.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_daily_target_composite", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const data = await callWrapper("GET", `/daily-target-composite?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "document_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_daily_target_composite", "success", {
+          agentId,
+          contentLength: content?.length ?? 0,
+        });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_daily_target_composite", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
 }

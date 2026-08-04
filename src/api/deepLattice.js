@@ -148,5 +148,14 @@ export function createDeepLatticeRouter() {
     });
   }
 
+  // GET /api/deep-lattice/daily-target-composite?agentId=
+  // → GET /internal/deep-lattice/daily-target-composite?tenantId=&agent_id=
+  // The collated daily-target composite (migration 012): every day's plan table
+  // stacked into one file. READ ONLY — no POST route here or orchestrator-side;
+  // the orchestrator maintains the file on every daily-targets write.
+  router.get("/daily-target-composite", (req, res) => {
+    return forward(req, res, "/daily-target-composite");
+  });
+
   return router;
 }
