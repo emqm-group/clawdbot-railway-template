@@ -679,6 +679,10 @@ class ConfigManager {
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only
       "read_template",
+      // Pre-signup briefs (migration 011) — orchestrator-generated before the
+      // founder signed up; read-only, so no create_* counterpart. Not a Deep
+      // Lattice layer, but its tool ships in the deep-lattice-tools plugin.
+      "read_signup_preview",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }

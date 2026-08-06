@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 18 tools that expose Deep Lattice file access to agents:
+// Registers 19 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -12,6 +12,8 @@
 //     read_latest_execution_plan.
 //   Daily-target composite (migration 012): read_daily_target_composite
 //     (read-only — orchestrator-maintained).
+//   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
+//     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
 // No profile/knowledge list/discovery tools — agent directives reference
 // specific profile slugs and knowledge filenames by name. create_briefing
@@ -39,7 +41,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 18 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 19 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -697,6 +699,55 @@ export default function register(api) {
         return okResult({ content });
       } catch (err) {
         logError("read_daily_target_composite", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Pre-signup briefs (NOT a Deep Lattice layer) ───────────
+  // read_signup_preview — the two documents the ORCHESTRATOR wrote itself, by
+  // direct LLM call from the company URL, before the founder had an account:
+  //   brief_profile   — the company as read from its website
+  //   brief_strategy  — written FROM the profile above
+  // They live in their own orchestrator table under their own bucket prefix,
+  // mounted outside /internal/deep-lattice; the tool ships here so the plugin
+  // keeps one loopback base URL, and /api/deep-lattice/signup-preview carries
+  // the cross-service hop. READ ONLY — the briefs are a fixed record of what
+  // the prospect was shown, so there is no write route and no create_* tool.
+  api.registerTool((ctx) => ({
+    name: "read_signup_preview",
+    description:
+      "Read the tenant's pre-signup briefs — the Brief Profile (the company as read from its website) and the Brief Strategy (written from that profile), both generated automatically from the company URL before the founder signed up. Use them as a starting point for your own work, not as a source of truth. Omit kind to get both, profile first; pass kind to get one. Returns { items: [{ kind, content }] } — an empty list if no brief was ever generated for this tenant. Read-only: these documents cannot be edited or replaced.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["brief_profile", "brief_strategy"],
+          description: "Limit to one brief. Omit for both.",
+        },
+      },
+    },
+    async execute(_toolCallId, args) {
+      const agentId = ctx.agentId;
+      const kind = args?.kind;
+      log("read_signup_preview", "called", { agentId, kind });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        if (kind) qs.set("kind", kind);
+        // `preview_not_found` is "nothing readable yet" (never generated, or no
+        // kind is ready) → empty list. Any other 404 (unknown_agent, route
+        // missing) must surface rather than read as "never previewed".
+        const data = await callWrapper("GET", `/signup-preview?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "preview_not_found",
+        });
+        const items = (data?.items ?? []).map((p) => ({ kind: p.kind, content: p.content }));
+        log("read_signup_preview", "success", { agentId, kind, count: items.length });
+        return okResult({ items });
+      } catch (err) {
+        logError("read_signup_preview", err.message, { agentId, kind });
         return errorResult(err.message);
       }
     },

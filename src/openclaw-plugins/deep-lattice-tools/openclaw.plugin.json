@@ -1,7 +1,7 @@
 {
   "id": "deep-lattice-tools",
   "name": "Deep Lattice Tools",
-  "description": "Deep Lattice file-access tools: read/write profile slugs, read knowledge files, read global templates, read the founder's style document and write its published section, create and read founder briefings, and create/read agent documents (analytics reports, plans, daily targets, execution plans), and read the orchestrator-maintained daily-target composite.",
+  "description": "Deep Lattice file-access tools: read/write profile slugs, read knowledge files, read global templates, read the founder's style document and write its published section, create and read founder briefings, and create/read agent documents (analytics reports, plans, daily targets, execution plans), read the orchestrator-maintained daily-target composite, and read the tenant's pre-signup briefs.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false

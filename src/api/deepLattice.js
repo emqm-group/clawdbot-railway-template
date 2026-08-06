@@ -15,6 +15,13 @@
  * Buffer (social posts) and Blog reads used to live here too; they are separate
  * services and now have their own router — see ./content.js (/api/content).
  *
+ * One route here is NOT Deep Lattice: /signup-preview forwards to the
+ * orchestrator's /internal/signup-preview (own table, own bucket prefix, mounted
+ * outside /internal/deep-lattice). It lives here because its tool ships in the
+ * deep-lattice-tools plugin, which keeps one loopback base URL — the same reason
+ * ./content.js spans /internal/buffer and /internal/blog. The cross-service hop
+ * is explicit: that route passes its own basePath.
+ *
  * NOTE: per-agent authorization has been removed orchestrator-side. The
  * orchestrator no longer gates which agent may call which operation; the shard
  * secret authenticates the wrapper, but any agent reaching these endpoints can
@@ -155,6 +162,18 @@ export function createDeepLatticeRouter() {
   // the orchestrator maintains the file on every daily-targets write.
   router.get("/daily-target-composite", (req, res) => {
     return forward(req, res, "/daily-target-composite");
+  });
+
+  // ── Pre-signup briefs (NOT Deep Lattice) ───────────────────
+  // GET /api/deep-lattice/signup-preview?agentId=&kind=
+  // → GET $ORCH/internal/signup-preview?tenantId=&agent_id=&kind=
+  // The two documents the orchestrator generated from the company URL before
+  // the founder signed up. Its own internal mount (own table + bucket prefix),
+  // so this route carries an explicit basePath. READ ONLY — no write route
+  // here or orchestrator-side; the briefs are a fixed record of what the
+  // prospect was shown.
+  router.get("/signup-preview", (req, res) => {
+    return forward(req, res, "", { kind: req.query.kind }, { basePath: "/internal/signup-preview" });
   });
 
   return router;
