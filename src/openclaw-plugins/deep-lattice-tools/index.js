@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 19 tools that expose Deep Lattice file access to agents:
+// Registers 21 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -12,6 +12,8 @@
 //     read_latest_execution_plan.
 //   Daily-target composite (migration 012): read_daily_target_composite
 //     (read-only — orchestrator-maintained).
+//   Publishing schedule (migration 013): create_publishing_schedule,
+//     read_publishing_schedule (also founder-editable).
 //   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
 //     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
@@ -41,7 +43,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 19 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 21 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -699,6 +701,72 @@ export default function register(api) {
         return okResult({ content });
       } catch (err) {
         logError("read_daily_target_composite", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Publishing schedule (migration 013) ────────────────────
+  // The channel-wise weekly cadence, its own file rather than prose inside the
+  // content strategy, so the founder can view and edit it directly. One live
+  // document per tenant, latest-wins, and the only doc written by BOTH an agent
+  // and the founder — every write appends a new version, so neither clobbers
+  // the other. Like the other create_* tools the write date is server-stamped
+  // (today in tenant tz) and is not an agent-facing parameter; the title is
+  // fixed server-side too, there being exactly one such document per tenant.
+
+  api.registerTool((ctx) => ({
+    name: "create_publishing_schedule",
+    description:
+      "Write the tenant's publishing schedule — the channel-wise weekly publishing frequency (how many posts per week on each channel). The supplied content replaces the whole schedule, so pass the complete document, not a change to it. Content must not be empty — there is no way to clear the schedule from here. The founder can also edit this file, so read it before rewriting rather than assuming your last version is still current.",
+    parameters: {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          minLength: 1,
+          description: "Full markdown body of the publishing schedule.",
+        },
+      },
+    },
+    async execute(_toolCallId, { content }) {
+      const agentId = ctx.agentId;
+      log("create_publishing_schedule", "called", { agentId, contentLength: content?.length ?? 0 });
+      try {
+        await callWrapper("POST", "/publishing-schedule", { agentId, content });
+        log("create_publishing_schedule", "success", { agentId });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("create_publishing_schedule", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  api.registerTool((ctx) => ({
+    name: "read_publishing_schedule",
+    description:
+      "Read the tenant's current publishing schedule — the channel-wise weekly publishing frequency. Read it before planning what to publish, and before rewriting it: the founder edits this file too, so the latest version may not be yours. Takes no arguments. Returns { content }, where content is null if no schedule has been written yet.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_publishing_schedule", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const data = await callWrapper("GET", `/publishing-schedule?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "document_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_publishing_schedule", "success", {
+          agentId,
+          contentLength: content?.length ?? 0,
+        });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_publishing_schedule", err.message, { agentId });
         return errorResult(err.message);
       }
     },

@@ -675,6 +675,10 @@ class ConfigManager {
       // Daily-target composite (migration 012) — orchestrator-maintained
       // collated history; read-only, so there is no create_* counterpart.
       "read_daily_target_composite",
+      // Publishing schedule (migration 013) — channel-wise weekly cadence;
+      // latest-wins, written by both the agent and the founder.
+      "create_publishing_schedule",
+      "read_publishing_schedule",
       "create_execution_plan",
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only

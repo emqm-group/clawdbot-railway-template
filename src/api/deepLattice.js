@@ -164,6 +164,18 @@ export function createDeepLatticeRouter() {
     return forward(req, res, "/daily-target-composite");
   });
 
+  // publishing_schedule (migration 013) — the channel-wise weekly cadence, its
+  // own file rather than prose inside the content strategy. Latest-wins and
+  // written by BOTH sides: the agent POSTs a new version, the founder edits it
+  // from the tenant UI. No title on the write — one document per tenant, so the
+  // orchestrator fixes the title server-side.
+  router.post("/publishing-schedule", (req, res) => {
+    return forward(req, res, "/publishing-schedule");
+  });
+  router.get("/publishing-schedule", (req, res) => {
+    return forward(req, res, "/publishing-schedule");
+  });
+
   // ── Pre-signup briefs (NOT Deep Lattice) ───────────────────
   // GET /api/deep-lattice/signup-preview?agentId=&kind=
   // → GET $ORCH/internal/signup-preview?tenantId=&agent_id=&kind=
