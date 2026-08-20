@@ -15,6 +15,13 @@
  * Buffer (social posts) and Blog reads used to live here too; they are separate
  * services and now have their own router — see ./content.js (/api/content).
  *
+ * One route here is NOT Deep Lattice: /signup-preview forwards to the
+ * orchestrator's /internal/signup-preview (own table, own bucket prefix, mounted
+ * outside /internal/deep-lattice). It lives here because its tool ships in the
+ * deep-lattice-tools plugin, which keeps one loopback base URL — the same reason
+ * ./content.js spans /internal/buffer and /internal/blog. The cross-service hop
+ * is explicit: that route passes its own basePath.
+ *
  * NOTE: per-agent authorization has been removed orchestrator-side. The
  * orchestrator no longer gates which agent may call which operation; the shard
  * secret authenticates the wrapper, but any agent reaching these endpoints can
@@ -53,6 +60,26 @@ export function createDeepLatticeRouter() {
   // so a task Retry re-authors safely. (onboarding-flow-design.md §4)
   router.post("/profile/:slug", (req, res) => {
     return forward(req, res, `/profile/${encodeURIComponent(req.params.slug)}`);
+  });
+
+  // ── Founder's Style (migration 010) ────────────────────────
+  // One document, two sections stored as two blobs orchestrator-side. The GET
+  // returns them composed into a single markdown doc (404 when nothing has been
+  // written yet). The PUT writes the `published` section ONLY — `published` is a
+  // fixed path segment, not a param: the founder's `intended` section is their
+  // own words and has no agent-facing write path.
+
+  // GET /api/deep-lattice/founder-style?agentId=
+  // → GET /internal/deep-lattice/founder-style?tenantId=&agent_id=
+  router.get("/founder-style", (req, res) => {
+    return forward(req, res, "/founder-style");
+  });
+
+  // PUT /api/deep-lattice/founder-style/published/content
+  // → PUT /internal/deep-lattice/founder-style/published/content
+  // Body: { agent_id, content, tenantId }
+  router.put("/founder-style/published/content", (req, res) => {
+    return forward(req, res, "/founder-style/published/content");
   });
 
   // GET /api/deep-lattice/knowledge/:filename
@@ -127,6 +154,39 @@ export function createDeepLatticeRouter() {
       return forward(req, res, `/${path}/latest`);
     });
   }
+
+  // GET /api/deep-lattice/daily-target-composite?agentId=
+  // → GET /internal/deep-lattice/daily-target-composite?tenantId=&agent_id=
+  // The collated daily-target composite (migration 012): every day's plan table
+  // stacked into one file. READ ONLY — no POST route here or orchestrator-side;
+  // the orchestrator maintains the file on every daily-targets write.
+  router.get("/daily-target-composite", (req, res) => {
+    return forward(req, res, "/daily-target-composite");
+  });
+
+  // publishing_schedule (migration 013) — the channel-wise weekly cadence, its
+  // own file rather than prose inside the content strategy. Latest-wins and
+  // written by BOTH sides: the agent POSTs a new version, the founder edits it
+  // from the tenant UI. No title on the write — one document per tenant, so the
+  // orchestrator fixes the title server-side.
+  router.post("/publishing-schedule", (req, res) => {
+    return forward(req, res, "/publishing-schedule");
+  });
+  router.get("/publishing-schedule", (req, res) => {
+    return forward(req, res, "/publishing-schedule");
+  });
+
+  // ── Pre-signup briefs (NOT Deep Lattice) ───────────────────
+  // GET /api/deep-lattice/signup-preview?agentId=&kind=
+  // → GET $ORCH/internal/signup-preview?tenantId=&agent_id=&kind=
+  // The two documents the orchestrator generated from the company URL before
+  // the founder signed up. Its own internal mount (own table + bucket prefix),
+  // so this route carries an explicit basePath. READ ONLY — no write route
+  // here or orchestrator-side; the briefs are a fixed record of what the
+  // prospect was shown.
+  router.get("/signup-preview", (req, res) => {
+    return forward(req, res, "", { kind: req.query.kind }, { basePath: "/internal/signup-preview" });
+  });
 
   return router;
 }

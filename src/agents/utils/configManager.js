@@ -661,6 +661,10 @@ class ConfigManager {
       "create_profile_file",
       "create_briefing",
       "read_briefings",
+      // Founder's Style (migration 010) — read composes both sections; the
+      // write targets the `published` section only.
+      "read_founder_style",
+      "update_published_style",
       // Agent documents (migration 018)
       "create_analytics_report",
       "read_analytics_reports",
@@ -668,10 +672,21 @@ class ConfigManager {
       "read_latest_plan",
       "create_daily_target",
       "read_latest_daily_target",
+      // Daily-target composite (migration 012) — orchestrator-maintained
+      // collated history; read-only, so there is no create_* counterpart.
+      "read_daily_target_composite",
+      // Publishing schedule (migration 013) — channel-wise weekly cadence;
+      // latest-wins, written by both the agent and the founder.
+      "create_publishing_schedule",
+      "read_publishing_schedule",
       "create_execution_plan",
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only
       "read_template",
+      // Pre-signup briefs (migration 011) — orchestrator-generated before the
+      // founder signed up; read-only, so no create_* counterpart. Not a Deep
+      // Lattice layer, but its tool ships in the deep-lattice-tools plugin.
+      "read_signup_preview",
     ];
     return this.patchGlobalToolsAlsoAllow("add", DL_TOOLS);
   }

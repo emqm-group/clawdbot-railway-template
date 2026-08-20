@@ -1,13 +1,21 @@
 // Deep Lattice Tools plugin.
-// Registers 15 tools that expose Deep Lattice file access to agents:
+// Registers 21 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
+//   Founder's Style (migration 010): read_founder_style (both sections
+//     composed), update_published_style (published section only).
 //   Briefings: create_briefing, read_briefings.
 //   Agent documents (migration 018): create_analytics_report,
 //     read_analytics_reports, create_plan, read_latest_plan,
 //     create_daily_target, read_latest_daily_target, create_execution_plan,
 //     read_latest_execution_plan.
+//   Daily-target composite (migration 012): read_daily_target_composite
+//     (read-only — orchestrator-maintained).
+//   Publishing schedule (migration 013): create_publishing_schedule,
+//     read_publishing_schedule (also founder-editable).
+//   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
+//     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
 // No profile/knowledge list/discovery tools — agent directives reference
 // specific profile slugs and knowledge filenames by name. create_briefing
@@ -15,7 +23,9 @@
 // date. Agent documents are agent-authored working docs: analytics reports are
 // typed + filterable; plan is subtyped (gtm | content-strategy |
 // outbound-strategy) and latest-wins per subtype; daily_target / execution_plan
-// are untyped latest-wins.
+// are untyped latest-wins. The daily-target composite is the one document no
+// agent writes — the orchestrator rebuilds it from each daily_target write, so
+// it has a read tool and no create tool.
 //
 // NOTE: agent-level authorization has been removed orchestrator-side — there
 // is no longer a per-agent gate (no assertCanPerform). Any agent that has the
@@ -33,7 +43,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 15 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 21 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -50,7 +60,12 @@ function logError(tool, msg, meta) {
   console.error(`[DL-TOOLS] [${tool}] ERROR: ${msg}${metaStr}`);
 }
 
-async function callWrapper(method, path, body, { notFoundOk = false } = {}) {
+// `notFoundOk` maps a 404 to null for reads where "none exists yet" is a normal
+// state. `notFoundCode` narrows that to one orchestrator error code — without it
+// the wrapper's own 404s (unknown_agent) and a missing orchestrator route are
+// indistinguishable from an empty document, and the agent silently proceeds as
+// if the tenant had written nothing.
+async function callWrapper(method, path, body, { notFoundOk = false, notFoundCode } = {}) {
   const url = `${BASE_URL}${path}`;
   const opts = {
     method,
@@ -60,11 +75,10 @@ async function callWrapper(method, path, body, { notFoundOk = false } = {}) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(url, opts);
-  // For latest-wins reads, "none exists yet" is a normal state, not an error.
-  if (res.status === 404 && notFoundOk) {
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404 && notFoundOk && (!notFoundCode || data.code === notFoundCode)) {
     return null;
   }
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(
       `Deep Lattice tool error [${res.status}]: ${data.error ?? data.message ?? JSON.stringify(data)}`
@@ -255,6 +269,73 @@ export default function register(api) {
         return okResult({ ok: true });
       } catch (err) {
         logError("create_profile_file", err.message, { agentId, slug });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Founder's Style (migration 010) ────────────────────────
+  // One document with two sections orchestrator-side: `intended` (the founder's
+  // own words, founder-written) and `published` (inferred from their published
+  // posts, agent-written). The read returns both composed into one markdown doc;
+  // the write targets the `published` section only — there is no agent-facing
+  // path to `intended`, by tool name and by route.
+
+  // read_founder_style — the voice read before drafting. 404 orchestrator-side
+  // means "nothing captured yet", which is a normal state, not an error.
+  api.registerTool((ctx) => ({
+    name: "read_founder_style",
+    description:
+      "Read the tenant's Founder's Style document — how the founder writes. Returns both sections composed into one markdown document under the headings \"Founder's Intended Style\" (the founder's own words) and \"Founder's Published Style\" (inferred from their published posts). Read this before drafting so the output sounds like the founder. This is a read-only view for drafting — never pass this output back to update_published_style, which takes the published section's body alone. Takes no arguments. Returns { content }, where content is null if no founder style has been captured yet.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_founder_style", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        // Only the orchestrator's own "nothing written yet" 404 counts as empty.
+        // Any other 404 (unknown agent, route missing) must surface as an error —
+        // silently drafting in a generic voice is worse than a visible failure.
+        const data = await callWrapper("GET", `/founder-style?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "founder_style_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_founder_style", "success", { agentId, contentLength: content?.length ?? 0 });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_founder_style", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // update_published_style — writes the `published` section only. Latest wins;
+  // the founder's `intended` section is never read or touched by this call.
+  api.registerTool((ctx) => ({
+    name: "update_published_style",
+    description:
+      "Replace the Published Style section of the tenant's Founder's Style document — your inference of how the founder actually writes, drawn from reviewing their published posts. Pass the body of that section ONLY: no \"Founder's Published Style\" heading, and never the intended-style section. The supplied content replaces the published section entirely (latest wins) and is stored separately from the founder's intended style, which is their own and cannot be changed from here — so do not echo back what read_founder_style returned.",
+    parameters: {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          description: "Full new markdown content for the published style section.",
+        },
+      },
+    },
+    async execute(_toolCallId, { content }) {
+      const agentId = ctx.agentId;
+      log("update_published_style", "called", { agentId, contentLength: content?.length ?? 0 });
+      try {
+        await callWrapper("PUT", "/founder-style/published/content", { agentId, content });
+        log("update_published_style", "success", { agentId });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("update_published_style", err.message, { agentId });
         return errorResult(err.message);
       }
     },
@@ -590,4 +671,153 @@ export default function register(api) {
       },
     }));
   }
+
+  // read_daily_target_composite — the collated daily-target composite
+  // (migration 012): every day's plan table stacked into ONE file, newest day
+  // first, with a Date column prepended. READ ONLY by design — the orchestrator
+  // rebuilds the file on every create_daily_target write, so there is
+  // deliberately no matching create_* tool. Its 404 code is the same
+  // `document_not_found` the latest-wins reads use; gating on it keeps the
+  // wrapper's own 404s (unknown_agent) from reading as "no history yet".
+  api.registerTool((ctx) => ({
+    name: "read_daily_target_composite",
+    description:
+      "Read the collated history of daily targets — every day's plan table stacked into one markdown file, newest day first, with a Date column prepended to each row. Read this before choosing today's plan so you can see what you already covered on previous days. Takes no arguments. Returns { content }, where content is null if no daily target has been written yet. Read-only: this file is maintained automatically from each daily target you create, so never try to write it.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_daily_target_composite", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const data = await callWrapper("GET", `/daily-target-composite?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "document_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_daily_target_composite", "success", {
+          agentId,
+          contentLength: content?.length ?? 0,
+        });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_daily_target_composite", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Publishing schedule (migration 013) ────────────────────
+  // The channel-wise weekly cadence, its own file rather than prose inside the
+  // content strategy, so the founder can view and edit it directly. One live
+  // document per tenant, latest-wins, and the only doc written by BOTH an agent
+  // and the founder — every write appends a new version, so neither clobbers
+  // the other. Like the other create_* tools the write date is server-stamped
+  // (today in tenant tz) and is not an agent-facing parameter; the title is
+  // fixed server-side too, there being exactly one such document per tenant.
+
+  api.registerTool((ctx) => ({
+    name: "create_publishing_schedule",
+    description:
+      "Write the tenant's publishing schedule — the channel-wise weekly publishing frequency (how many posts per week on each channel). The supplied content replaces the whole schedule, so pass the complete document, not a change to it. Content must not be empty — there is no way to clear the schedule from here. The founder can also edit this file, so read it before rewriting rather than assuming your last version is still current.",
+    parameters: {
+      type: "object",
+      required: ["content"],
+      additionalProperties: false,
+      properties: {
+        content: {
+          type: "string",
+          minLength: 1,
+          description: "Full markdown body of the publishing schedule.",
+        },
+      },
+    },
+    async execute(_toolCallId, { content }) {
+      const agentId = ctx.agentId;
+      log("create_publishing_schedule", "called", { agentId, contentLength: content?.length ?? 0 });
+      try {
+        await callWrapper("POST", "/publishing-schedule", { agentId, content });
+        log("create_publishing_schedule", "success", { agentId });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("create_publishing_schedule", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  api.registerTool((ctx) => ({
+    name: "read_publishing_schedule",
+    description:
+      "Read the tenant's current publishing schedule — the channel-wise weekly publishing frequency. Read it before planning what to publish, and before rewriting it: the founder edits this file too, so the latest version may not be yours. Takes no arguments. Returns { content }, where content is null if no schedule has been written yet.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("read_publishing_schedule", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const data = await callWrapper("GET", `/publishing-schedule?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "document_not_found",
+        });
+        const content = data?.content ?? null;
+        log("read_publishing_schedule", "success", {
+          agentId,
+          contentLength: content?.length ?? 0,
+        });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_publishing_schedule", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Pre-signup briefs (NOT a Deep Lattice layer) ───────────
+  // read_signup_preview — the two documents the ORCHESTRATOR wrote itself, by
+  // direct LLM call from the company URL, before the founder had an account:
+  //   brief_profile   — the company as read from its website
+  //   brief_strategy  — written FROM the profile above
+  // They live in their own orchestrator table under their own bucket prefix,
+  // mounted outside /internal/deep-lattice; the tool ships here so the plugin
+  // keeps one loopback base URL, and /api/deep-lattice/signup-preview carries
+  // the cross-service hop. READ ONLY — the briefs are a fixed record of what
+  // the prospect was shown, so there is no write route and no create_* tool.
+  api.registerTool((ctx) => ({
+    name: "read_signup_preview",
+    description:
+      "Read the tenant's pre-signup briefs — the Brief Profile (the company as read from its website) and the Brief Strategy (written from that profile), both generated automatically from the company URL before the founder signed up. Use them as a starting point for your own work, not as a source of truth. Omit kind to get both, profile first; pass kind to get one. Returns { items: [{ kind, content }] } — an empty list if no brief was ever generated for this tenant. Read-only: these documents cannot be edited or replaced.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["brief_profile", "brief_strategy"],
+          description: "Limit to one brief. Omit for both.",
+        },
+      },
+    },
+    async execute(_toolCallId, args) {
+      const agentId = ctx.agentId;
+      const kind = args?.kind;
+      log("read_signup_preview", "called", { agentId, kind });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        if (kind) qs.set("kind", kind);
+        // `preview_not_found` is "nothing readable yet" (never generated, or no
+        // kind is ready) → empty list. Any other 404 (unknown_agent, route
+        // missing) must surface rather than read as "never previewed".
+        const data = await callWrapper("GET", `/signup-preview?${qs.toString()}`, undefined, {
+          notFoundOk: true,
+          notFoundCode: "preview_not_found",
+        });
+        const items = (data?.items ?? []).map((p) => ({ kind: p.kind, content: p.content }));
+        log("read_signup_preview", "success", { agentId, kind, count: items.length });
+        return okResult({ items });
+      } catch (err) {
+        logError("read_signup_preview", err.message, { agentId, kind });
+        return errorResult(err.message);
+      }
+    },
+  }));
 }
