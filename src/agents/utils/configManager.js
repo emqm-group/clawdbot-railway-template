@@ -679,6 +679,10 @@ class ConfigManager {
       // latest-wins, written by both the agent and the founder.
       "create_publishing_schedule",
       "read_publishing_schedule",
+      // Campaign files (migration 019) — the only campaign-scoped documents;
+      // both tools take a campaign_id supplied by the calling agent's task.
+      "read_campaign_file",
+      "create_campaign_file",
       "create_execution_plan",
       "read_latest_execution_plan",
       // Templates (migration 019) — global, read-only

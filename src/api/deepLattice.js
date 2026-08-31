@@ -176,6 +176,45 @@ export function createDeepLatticeRouter() {
     return forward(req, res, "/publishing-schedule");
   });
 
+  // ── Campaign files (migration 019) ─────────────────────────
+  // A campaign's working strategy, one markdown file per function ("content"
+  // in v1). Campaign-scoped, unlike every other agent document here, so the
+  // campaign id is a path segment on both routes — the orchestrator resolves
+  // the campaign within the tenant and 404s `campaign_not_found` when it does
+  // not belong to it.
+  //
+  // The write takes the BODY ONLY: the orchestrator composes the campaign's
+  // header block (name, dates, segment, pitch, offer, channels and their daily
+  // maximums) from the campaign record on every write, so an agent cannot put
+  // a stale or invented campaign definition into the file other agents read.
+  //
+  // Rewritten in place at a key stable per (campaign, function) — one live
+  // document per pair, like the daily-target composite.
+  //
+  // No list route: agents are handed a campaign id by their directive/task and
+  // read the function they need by name, the same as profile slugs.
+
+  // GET /api/deep-lattice/campaigns/:campaignId/files/:fn?agentId=
+  // → GET /internal/deep-lattice/campaigns/:campaignId/files/:fn?tenantId=&agent_id=
+  router.get("/campaigns/:campaignId/files/:fn", (req, res) => {
+    return forward(
+      req,
+      res,
+      `/campaigns/${encodeURIComponent(req.params.campaignId)}/files/${encodeURIComponent(req.params.fn)}`
+    );
+  });
+
+  // POST /api/deep-lattice/campaigns/:campaignId/files/:fn
+  // → POST /internal/deep-lattice/campaigns/:campaignId/files/:fn
+  // Body: { agent_id, content, tenantId }
+  router.post("/campaigns/:campaignId/files/:fn", (req, res) => {
+    return forward(
+      req,
+      res,
+      `/campaigns/${encodeURIComponent(req.params.campaignId)}/files/${encodeURIComponent(req.params.fn)}`
+    );
+  });
+
   // ── Pre-signup briefs (NOT Deep Lattice) ───────────────────
   // GET /api/deep-lattice/signup-preview?agentId=&kind=
   // → GET $ORCH/internal/signup-preview?tenantId=&agent_id=&kind=

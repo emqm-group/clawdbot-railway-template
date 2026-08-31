@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 21 tools that expose Deep Lattice file access to agents:
+// Registers 23 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -14,6 +14,8 @@
 //     (read-only — orchestrator-maintained).
 //   Publishing schedule (migration 013): create_publishing_schedule,
 //     read_publishing_schedule (also founder-editable).
+//   Campaign files (migration 019): read_campaign_file, create_campaign_file
+//     — the only campaign-scoped documents here; both take a campaign_id.
 //   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
 //     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
@@ -43,12 +45,33 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 21 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 23 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
 const WRAPPER_PORT = process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000";
 const BASE_URL = `http://127.0.0.1:${WRAPPER_PORT}/api/deep-lattice`;
+
+// Campaign functions the campaign-file tools expose — the enum on both tools
+// and the prose in their descriptions are generated from this one list, so
+// shipping outbound or ads is adding a string here and nothing else.
+//
+// Deliberately NARROWER than the orchestrator, which already accepts
+// "outbound" and "ads": a campaign has no file for a function that does not
+// run yet, so offering them would only let a model author a document nothing
+// reads. The DEFAULT is the first entry.
+const CAMPAIGN_FUNCTIONS = ["content"];
+const DEFAULT_CAMPAIGN_FUNCTION = CAMPAIGN_FUNCTIONS[0];
+
+// The `function` parameter, identical on the read and the write.
+const campaignFunctionParam = {
+  type: "string",
+  enum: CAMPAIGN_FUNCTIONS,
+  description:
+    CAMPAIGN_FUNCTIONS.length === 1
+      ? `Which function's file. Only '${DEFAULT_CAMPAIGN_FUNCTION}' exists today, so omit it.`
+      : `Which function's file: ${CAMPAIGN_FUNCTIONS.join(", ")}. Defaults to '${DEFAULT_CAMPAIGN_FUNCTION}'.`,
+};
 
 function log(tool, msg, meta) {
   const metaStr = meta ? " " + JSON.stringify(meta) : "";
@@ -767,6 +790,121 @@ export default function register(api) {
         return okResult({ content });
       } catch (err) {
         logError("read_publishing_schedule", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // ── Campaign files (migration 019) ─────────────────────────
+  // A campaign's working strategy — one markdown file per FUNCTION per
+  // campaign, holding the angles and topics a writer works from. `content` is
+  // the only function in v1; `outbound` and `ads` follow when those ship —
+  // add the string to CAMPAIGN_FUNCTIONS at the top of this file and both
+  // tools pick it up. The orchestrator already accepts all three.
+  //
+  // These are the only CAMPAIGN-scoped documents in this plugin — everything
+  // else here is account-scoped — so both tools require a campaign_id. The
+  // agent is always GIVEN that id by its task or directive and never infers
+  // it: with two campaigns open, guessing attaches work to the wrong one, and
+  // with one open today it would silently become wrong tomorrow.
+  //
+  // The write takes the BODY ONLY. The orchestrator composes the campaign's
+  // header block — name, dates, segment, pitch, offer, channels and their
+  // daily maximums — from the campaign record on every write, so an agent
+  // cannot write a stale or invented campaign definition into the file the
+  // other agents then read. One live file per (campaign, function), rewritten
+  // in place, so a write replaces the previous body rather than versioning it.
+  //
+  // No list tool: the function is named by the directive, the same way profile
+  // slugs and knowledge filenames are.
+
+  api.registerTool((ctx) => ({
+    name: "read_campaign_file",
+    description:
+      "Read a campaign's working strategy file — the angles, topics and guidance for producing work for THAT campaign, plus a header block with the campaign's definition (name, dates, target segment, core pitch, offer, and the channels with their daily maximums). Read it before writing anything for a campaign. campaign_id must be the one your task gave you — never guess it, and never reuse one from another task. Returns { content }, where content is null if this campaign has no file for that function yet.",
+    parameters: {
+      type: "object",
+      required: ["campaign_id"],
+      additionalProperties: false,
+      properties: {
+        campaign_id: {
+          type: "string",
+          description: "The campaign's id, exactly as supplied by your task.",
+        },
+        function: campaignFunctionParam,
+      },
+    },
+    async execute(_toolCallId, args = {}) {
+      const { campaign_id: campaignId, function: fn = DEFAULT_CAMPAIGN_FUNCTION } = args;
+      const agentId = ctx.agentId;
+      log("read_campaign_file", "called", { agentId, campaignId, fn });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        // `document_not_found` is "this campaign has no such file yet" → null.
+        // `campaign_not_found` (a bad id, or one from another tenant) must
+        // surface as an error instead — a wrong id reading as an empty file is
+        // how an agent ends up authoring a campaign's strategy from nothing.
+        const data = await callWrapper(
+          "GET",
+          `/campaigns/${encodeURIComponent(campaignId)}/files/${encodeURIComponent(fn)}?${qs.toString()}`,
+          undefined,
+          { notFoundOk: true, notFoundCode: "document_not_found" }
+        );
+        const content = data?.content ?? null;
+        log("read_campaign_file", "success", {
+          agentId,
+          campaignId,
+          fn,
+          contentLength: content?.length ?? 0,
+        });
+        return okResult({ content });
+      } catch (err) {
+        logError("read_campaign_file", err.message, { agentId, campaignId, fn });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  api.registerTool((ctx) => ({
+    name: "create_campaign_file",
+    description:
+      "Write a campaign's working strategy file — the angles, topics and guidance the writers for THAT campaign work from. Pass the complete document body: it replaces the whole file, so read the current one first rather than assuming your last version is still there. Do NOT include the campaign's name, dates, segment, pitch, offer or channel volumes — that header is added automatically from the campaign record, and anything you write about it is ignored. Content must not be empty; there is no way to clear a campaign file from here. campaign_id must be the one your task gave you — never guess it.",
+    parameters: {
+      type: "object",
+      required: ["campaign_id", "content"],
+      additionalProperties: false,
+      properties: {
+        campaign_id: {
+          type: "string",
+          description: "The campaign's id, exactly as supplied by your task.",
+        },
+        content: {
+          type: "string",
+          minLength: 1,
+          description: "Full markdown body of the strategy, without a campaign header block.",
+        },
+        function: campaignFunctionParam,
+      },
+    },
+    async execute(_toolCallId, args = {}) {
+      const { campaign_id: campaignId, content, function: fn = DEFAULT_CAMPAIGN_FUNCTION } = args;
+      const agentId = ctx.agentId;
+      log("create_campaign_file", "called", {
+        agentId,
+        campaignId,
+        fn,
+        contentLength: content?.length ?? 0,
+      });
+      try {
+        await callWrapper(
+          "POST",
+          `/campaigns/${encodeURIComponent(campaignId)}/files/${encodeURIComponent(fn)}`,
+          { agentId, content }
+        );
+        log("create_campaign_file", "success", { agentId, campaignId, fn });
+        return okResult({ ok: true });
+      } catch (err) {
+        logError("create_campaign_file", err.message, { agentId, campaignId, fn });
         return errorResult(err.message);
       }
     },
