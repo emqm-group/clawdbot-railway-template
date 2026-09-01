@@ -194,6 +194,16 @@ export function createDeepLatticeRouter() {
   // No list route: agents are handed a campaign id by their directive/task and
   // read the function they need by name, the same as profile slugs.
 
+  // GET /api/deep-lattice/campaigns/:campaignId?agentId=
+  // → GET /internal/deep-lattice/campaigns/:campaignId?tenantId=&agent_id=
+  // The campaign's DEFINITION — what it is aimed at and what it says. Read
+  // before proposing a campaign's angles and topics: a newly created campaign
+  // has no file yet, so the definition is the only input that exists. Carries
+  // no ceiling or headroom figures — volumes are computed, not proposed (D23).
+  router.get("/campaigns/:campaignId", (req, res) => {
+    return forward(req, res, `/campaigns/${encodeURIComponent(req.params.campaignId)}`);
+  });
+
   // GET /api/deep-lattice/campaigns/:campaignId/files/:fn?agentId=
   // → GET /internal/deep-lattice/campaigns/:campaignId/files/:fn?tenantId=&agent_id=
   router.get("/campaigns/:campaignId/files/:fn", (req, res) => {

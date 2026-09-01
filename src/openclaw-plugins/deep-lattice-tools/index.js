@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 23 tools that expose Deep Lattice file access to agents:
+// Registers 24 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -14,8 +14,10 @@
 //     (read-only — orchestrator-maintained).
 //   Publishing schedule (migration 013): create_publishing_schedule,
 //     read_publishing_schedule (also founder-editable).
-//   Campaign files (migration 019): read_campaign_file, create_campaign_file
-//     — the only campaign-scoped documents here; both take a campaign_id.
+//   Campaigns (migration 019): read_campaign (the campaign record),
+//     read_campaign_file, create_campaign_file (its per-function strategy
+//     file) — the only campaign-scoped documents here; all three take a
+//     campaign_id supplied by the calling agent's task.
 //   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
 //     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
@@ -45,7 +47,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 23 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 24 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -817,6 +819,58 @@ export default function register(api) {
   //
   // No list tool: the function is named by the directive, the same way profile
   // slugs and knowledge filenames are.
+
+  // read_campaign — the campaign RECORD, not its file. The two are different
+  // reads and a Function Lead needs both: a newly created campaign has no file
+  // yet, so the definition is the only input that exists when it is asked to
+  // propose the angles and topics that will BECOME the file.
+  //
+  // No ceiling or headroom figures here by design — per-channel volumes are
+  // computed from the channel defaults and current headroom, not proposed, so
+  // an agent shown those numbers would be reasoning about a limit it has no
+  // say over (campaigns-design.md D23).
+  //
+  // Unlike read_campaign_file this has NO not-found-is-empty case: a campaign
+  // id that does not resolve is a wrong id, never "not created yet", so a 404
+  // surfaces as an error.
+  api.registerTool((ctx) => ({
+    name: "read_campaign",
+    description:
+      "Read a campaign's definition — its name, status, start and end dates, target segment, core pitch, offer, and the channels it runs on with their daily maximums. Read it before proposing or writing anything for a campaign: the segment, pitch and offer are HARD CONSTRAINTS on what you may produce, not suggestions. A campaign that has just been created has no strategy file yet, so this is the only input that exists — use read_campaign_file for the angles and topics once one has been written. campaign_id must be the one your task gave you — never guess it. Returns { campaign }.",
+    parameters: {
+      type: "object",
+      required: ["campaign_id"],
+      additionalProperties: false,
+      properties: {
+        campaign_id: {
+          type: "string",
+          description: "The campaign's id, exactly as supplied by your task.",
+        },
+      },
+    },
+    async execute(_toolCallId, args = {}) {
+      const { campaign_id: campaignId } = args;
+      const agentId = ctx.agentId;
+      log("read_campaign", "called", { agentId, campaignId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const campaign = await callWrapper(
+          "GET",
+          `/campaigns/${encodeURIComponent(campaignId)}?${qs.toString()}`
+        );
+        log("read_campaign", "success", {
+          agentId,
+          campaignId,
+          status: campaign?.status,
+          channelCount: campaign?.channels?.length ?? 0,
+        });
+        return okResult({ campaign });
+      } catch (err) {
+        logError("read_campaign", err.message, { agentId, campaignId });
+        return errorResult(err.message);
+      }
+    },
+  }));
 
   api.registerTool((ctx) => ({
     name: "read_campaign_file",

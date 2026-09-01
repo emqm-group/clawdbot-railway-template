@@ -679,8 +679,10 @@ class ConfigManager {
       // latest-wins, written by both the agent and the founder.
       "create_publishing_schedule",
       "read_publishing_schedule",
-      // Campaign files (migration 019) — the only campaign-scoped documents;
-      // both tools take a campaign_id supplied by the calling agent's task.
+      // Campaigns (migration 019) — the campaign record and its per-function
+      // strategy file. The only campaign-scoped documents here; all three take
+      // a campaign_id supplied by the calling agent's task.
+      "read_campaign",
       "read_campaign_file",
       "create_campaign_file",
       "create_execution_plan",
