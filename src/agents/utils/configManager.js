@@ -680,8 +680,10 @@ class ConfigManager {
       "create_publishing_schedule",
       "read_publishing_schedule",
       // Campaigns (migration 019) — the campaign record and its per-function
-      // strategy file. The only campaign-scoped documents here; all three take
+      // strategy file, the only campaign-scoped documents here.
+      // list_active_campaigns is the sole discovery read; the other three take
       // a campaign_id supplied by the calling agent's task.
+      "list_active_campaigns",
       "read_campaign",
       "read_campaign_file",
       "create_campaign_file",

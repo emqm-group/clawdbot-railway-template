@@ -183,16 +183,34 @@ export function createDeepLatticeRouter() {
   // the campaign within the tenant and 404s `campaign_not_found` when it does
   // not belong to it.
   //
-  // The write takes the BODY ONLY: the orchestrator composes the campaign's
-  // header block (name, dates, segment, pitch, offer, channels and their daily
-  // maximums) from the campaign record on every write, so an agent cannot put
-  // a stale or invented campaign definition into the file other agents read.
+  // The write takes the WHOLE FILE — header block and body. The orchestrator
+  // stores it verbatim and composes no part of it, so the campaign's
+  // definition in the header is agent-written, read back from
+  // GET /campaigns/:campaignId. The database remains the source of truth; the
+  // Memory Manager is fired a resync task to realign the file when a mirrored
+  // field moves, which only works because the header is the agent's to write.
   //
   // Rewritten in place at a key stable per (campaign, function) — one live
   // document per pair, like the daily-target composite.
   //
-  // No list route: agents are handed a campaign id by their directive/task and
-  // read the function they need by name, the same as profile slugs.
+  // The orchestrator's GET /campaigns/:campaignId/files (which functions a
+  // campaign has a file for) is deliberately NOT proxied: with `content` the
+  // only function, read_campaign_file returning null already answers it. Add
+  // it alongside outbound/ads, so the list and the read agree on what exists.
+  //
+  // Campaign DISCOVERY is a different question and does have a route — see
+  // GET /campaigns below. Everything past it takes an id from the task.
+
+  // GET /api/deep-lattice/campaigns?agentId=
+  // → GET /internal/deep-lattice/campaigns?tenantId=&agent_id=
+  // Every ACTIVE campaign with its channel claims — what the cross-campaign
+  // planner runs on. Active is the whole filter: no other status takes new
+  // work, so returning one would invite volume that task creation refuses.
+  // Registered before /campaigns/:campaignId to mirror the orchestrator's
+  // ordering; the two do not actually collide (different segment counts).
+  router.get("/campaigns", (req, res) => {
+    return forward(req, res, "/campaigns");
+  });
 
   // GET /api/deep-lattice/campaigns/:campaignId?agentId=
   // → GET /internal/deep-lattice/campaigns/:campaignId?tenantId=&agent_id=

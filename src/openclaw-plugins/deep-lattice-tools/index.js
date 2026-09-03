@@ -1,5 +1,5 @@
 // Deep Lattice Tools plugin.
-// Registers 24 tools that expose Deep Lattice file access to agents:
+// Registers 25 tools that expose Deep Lattice file access to agents:
 //   Profile/knowledge: read_profile_file, read_knowledge_file,
 //     update_profile_file, create_profile_file.
 //   Templates (migration 019): read_template (global, read-only).
@@ -14,10 +14,12 @@
 //     (read-only — orchestrator-maintained).
 //   Publishing schedule (migration 013): create_publishing_schedule,
 //     read_publishing_schedule (also founder-editable).
-//   Campaigns (migration 019): read_campaign (the campaign record),
-//     read_campaign_file, create_campaign_file (its per-function strategy
-//     file) — the only campaign-scoped documents here; all three take a
-//     campaign_id supplied by the calling agent's task.
+//   Campaigns (migration 019): list_active_campaigns (every running campaign
+//     — the planner's entry point, and the only campaign discovery here),
+//     read_campaign (one campaign record), read_campaign_file,
+//     create_campaign_file (its per-function strategy file). The only
+//     campaign-scoped documents here; the latter three take a campaign_id
+//     supplied by the calling agent's task.
 //   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
 //     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
@@ -47,7 +49,7 @@
 // no longer authorizes the caller; tool visibility (the allowlist) is the only
 // remaining gate.
 //
-// Tool exposure: all 24 tools are added to the global tools.alsoAllow list so
+// Tool exposure: all 25 tools are added to the global tools.alsoAllow list so
 // they are eligible. Per-agent `tools.allow` is the actual gate — an agent
 // only sees a DL tool if it is listed in that agent's allowlist.
 
@@ -810,15 +812,60 @@ export default function register(api) {
   // it: with two campaigns open, guessing attaches work to the wrong one, and
   // with one open today it would silently become wrong tomorrow.
   //
-  // The write takes the BODY ONLY. The orchestrator composes the campaign's
-  // header block — name, dates, segment, pitch, offer, channels and their
-  // daily maximums — from the campaign record on every write, so an agent
-  // cannot write a stale or invented campaign definition into the file the
-  // other agents then read. One live file per (campaign, function), rewritten
-  // in place, so a write replaces the previous body rather than versioning it.
+  // The write takes the WHOLE FILE — header block and body. The orchestrator
+  // stores exactly what it is handed and composes no part of it, so the agent
+  // writes the campaign's definition into the header itself, reading it back
+  // from read_campaign rather than from memory.
   //
-  // No list tool: the function is named by the directive, the same way profile
-  // slugs and knowledge filenames are.
+  // The database is still the source of truth; keeping the file's mirror of it
+  // aligned is the Memory Manager's job, and the orchestrator fires it a
+  // resync task whenever a mirrored field moves. That directive is only
+  // followable because the header is agent-written — do not tell the model to
+  // omit it.
+  //
+  // One live file per (campaign, function), rewritten in place, so a write
+  // replaces the whole previous file rather than versioning it.
+  //
+  // A file generated BEFORE signup has no header — the campaign id and the
+  // per-channel maximums do not exist yet, and those paths are bare model
+  // calls with no agent to write one. MM adds it on the first campaign change
+  // after signup, so the read tool has to treat a headerless file as normal.
+  //
+  // No tool for listing a campaign's FILES: with `content` the only function,
+  // read_campaign_file returning null already answers which files exist. Add
+  // one alongside outbound/ads, so it cannot name a function the read refuses.
+  // Listing CAMPAIGNS is a different question — list_active_campaigns below.
+
+  // list_active_campaigns — the cross-campaign planner's entry point, and the
+  // only tool here that discovers campaigns rather than being handed one. The
+  // planner allocates a day across everything currently running, so it needs
+  // the whole set in one call; every other campaign tool takes an id its task
+  // supplied.
+  //
+  // ACTIVE only, which is the orchestrator's entire filter — Draft, Scheduled,
+  // Paused, Unfunded and Expired campaigns take no new work and task creation
+  // refuses one, so allocating against them would only be rejected downstream.
+  // An empty list is therefore a normal answer, not an error.
+  api.registerTool((ctx) => ({
+    name: "list_active_campaigns",
+    description:
+      "List every campaign that is currently ACTIVE, each with its id, definition (name, status, target segment, core pitch, offer, dates) and its channels. Use it to plan a day across all running campaigns. Carry each campaign's id into every task you create for it — that is the only way work gets attached to the right campaign. A channel entry has enabled true or false: plan ONLY on enabled ones, since work aimed at a disabled channel is refused when the task is created. A channel's max_daily_posts is a CEILING, not a quota — never plan more than it, and plan fewer when a campaign has nothing worth saying. Campaigns that are not active take no new work and are deliberately absent. Takes no arguments. Returns { campaigns: [...] } — an empty list when nothing is running, which is a normal state and not an error.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId) {
+      const agentId = ctx.agentId;
+      log("list_active_campaigns", "called", { agentId });
+      try {
+        const qs = new URLSearchParams({ agentId });
+        const data = await callWrapper("GET", `/campaigns?${qs.toString()}`);
+        const campaigns = data?.campaigns ?? [];
+        log("list_active_campaigns", "success", { agentId, count: campaigns.length });
+        return okResult({ campaigns });
+      } catch (err) {
+        logError("list_active_campaigns", err.message, { agentId });
+        return errorResult(err.message);
+      }
+    },
+  }));
 
   // read_campaign — the campaign RECORD, not its file. The two are different
   // reads and a Function Lead needs both: a newly created campaign has no file
@@ -836,7 +883,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_campaign",
     description:
-      "Read a campaign's definition — its name, status, start and end dates, target segment, core pitch, offer, and the channels it runs on with their daily maximums. Read it before proposing or writing anything for a campaign: the segment, pitch and offer are HARD CONSTRAINTS on what you may produce, not suggestions. A campaign that has just been created has no strategy file yet, so this is the only input that exists — use read_campaign_file for the angles and topics once one has been written. campaign_id must be the one your task gave you — never guess it. Returns { campaign }.",
+      "Read a campaign's definition — its id, name, status, start and end dates, target segment, core pitch, offer, and its channels. Read it before proposing or writing anything for a campaign: the segment, pitch and offer are HARD CONSTRAINTS on what you may produce, not suggestions. A channel entry has enabled true or false, and only the enabled ones take work. A campaign that has just been created has no strategy file yet, so this is the only input that exists — use read_campaign_file for the angles and topics once one has been written. This is also the source to copy the campaign header from when writing that file with create_campaign_file. campaign_id must be the one your task gave you — never guess it. Returns { campaign }.",
     parameters: {
       type: "object",
       required: ["campaign_id"],
@@ -875,7 +922,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_campaign_file",
     description:
-      "Read a campaign's working strategy file — the angles, topics and guidance for producing work for THAT campaign, plus a header block with the campaign's definition (name, dates, target segment, core pitch, offer, and the channels with their daily maximums). Read it before writing anything for a campaign. campaign_id must be the one your task gave you — never guess it, and never reuse one from another task. Returns { content }, where content is null if this campaign has no file for that function yet.",
+      "Read a campaign's working strategy file — the angles, topics and guidance for producing work for THAT campaign. It usually opens with a header block mirroring the campaign's definition, but a file generated before the founder signed up has no header at all; that is normal, not a damaged file. Read it before writing anything for a campaign, and take the definition from read_campaign whenever the header is missing or disagrees with it — the header is agent-written and the database is the source of truth. campaign_id must be the one your task gave you — never guess it, and never reuse one from another task. Returns { content }, where content is null if this campaign has no file for that function yet.",
     parameters: {
       type: "object",
       required: ["campaign_id"],
@@ -922,7 +969,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "create_campaign_file",
     description:
-      "Write a campaign's working strategy file — the angles, topics and guidance the writers for THAT campaign work from. Pass the complete document body: it replaces the whole file, so read the current one first rather than assuming your last version is still there. Do NOT include the campaign's name, dates, segment, pitch, offer or channel volumes — that header is added automatically from the campaign record, and anything you write about it is ignored. Content must not be empty; there is no way to clear a campaign file from here. campaign_id must be the one your task gave you — never guess it.",
+      "Write a campaign's working strategy file — the angles, topics and guidance the writers for THAT campaign work from. Pass the COMPLETE file: it is stored exactly as given and replaces everything that was there, so read the current one first rather than assuming your last version is still present. Open it with a header block stating the campaign's definition — id, name, status, start and end dates, target segment, core pitch, offer, and each channel with its daily maximum AND whether it is enabled — then the strategy below it. Take those values from read_campaign, never from memory: the database is the source of truth and the header only mirrors it. Mark disabled channels as disabled rather than dropping them, and do not write strategy aimed at one: work for a disabled channel is refused when the task is created. Content must not be empty; there is no way to clear a campaign file from here. campaign_id must be the one your task gave you — never guess it.",
     parameters: {
       type: "object",
       required: ["campaign_id", "content"],
@@ -935,7 +982,8 @@ export default function register(api) {
         content: {
           type: "string",
           minLength: 1,
-          description: "Full markdown body of the strategy, without a campaign header block.",
+          description:
+            "The complete markdown file: the campaign header block, then the strategy.",
         },
         function: campaignFunctionParam,
       },
