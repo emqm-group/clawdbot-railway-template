@@ -681,9 +681,15 @@ class ConfigManager {
       "read_publishing_schedule",
       // Campaigns (migration 019) — the campaign record and its per-function
       // strategy file, the only campaign-scoped documents here.
-      // list_active_campaigns is the sole discovery read; the other three take
-      // a campaign_id supplied by the calling agent's task.
+      // list_active_campaigns is the sole discovery read and create_campaign
+      // the sole write of a RECORD; the other three take a campaign_id supplied
+      // by the calling agent's task. create_campaign and update_campaign take
+      // channel TYPES, never volumes — those are computed from the ceiling and
+      // headroom (D23). update_campaign is also the only agent-facing way to
+      // move a campaign's STATUS, which is what lets an agent pause one.
       "list_active_campaigns",
+      "create_campaign",
+      "update_campaign",
       "read_campaign",
       "read_campaign_file",
       "create_campaign_file",

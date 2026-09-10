@@ -15,12 +15,16 @@
  * Buffer (social posts) and Blog reads used to live here too; they are separate
  * services and now have their own router — see ./content.js (/api/content).
  *
- * One route here is NOT Deep Lattice: /signup-preview forwards to the
- * orchestrator's /internal/signup-preview (own table, own bucket prefix, mounted
- * outside /internal/deep-lattice). It lives here because its tool ships in the
- * deep-lattice-tools plugin, which keeps one loopback base URL — the same reason
- * ./content.js spans /internal/buffer and /internal/blog. The cross-service hop
- * is explicit: that route passes its own basePath.
+ * Two surfaces here are NOT Deep Lattice, and both live here for the same
+ * reason: their tools ship in the deep-lattice-tools plugin, which keeps one
+ * loopback base URL — as ./content.js spans /internal/buffer and /internal/blog.
+ * The cross-service hop is explicit; each such route passes its own basePath.
+ *   /signup-preview  → /internal/signup-preview (own table + bucket prefix)
+ *   /campaigns (the RECORD routes) → /internal/campaigns. A campaign is
+ *     its own entity with its own tables and lifecycle; only the agent surface
+ *     had filed the record under Deep Lattice, and that was drift. The campaign
+ *     FILE routes stay on the default basePath — a campaign file genuinely is a
+ *     Deep Lattice document.
  *
  * NOTE: per-agent authorization has been removed orchestrator-side. The
  * orchestrator no longer gates which agent may call which operation; the shard
@@ -30,6 +34,11 @@
 
 import express from "express";
 import { createInternalProxy } from "./internalProxy.js";
+
+// The campaign RECORD routes' orchestrator mount — its own entity, outside Deep
+// Lattice (Campaigns P9). Named once because every record route overrides with
+// it and a typo on one of them is a 404 only that tool sees.
+const CAMPAIGNS_BASE_PATH = "/internal/campaigns";
 
 export function createDeepLatticeRouter() {
   const router = express.Router();
@@ -199,28 +208,101 @@ export function createDeepLatticeRouter() {
   // it alongside outbound/ads, so the list and the read agree on what exists.
   //
   // Campaign DISCOVERY is a different question and does have a route — see
-  // GET /campaigns below. Everything past it takes an id from the task.
+  // GET /campaigns below, alongside the create that brings one into existence.
+  // Every other campaign route takes an id its caller was given by a task.
+
+  // ── Campaign RECORDS — NOT Deep Lattice ────────────────────
+  // The record routes moved orchestrator-side to their own mount,
+  // /internal/campaigns (Campaigns P9). A campaign is its own entity — its own
+  // tables, lifecycle and provisioning services, and its own mounts on the
+  // admin and founder surfaces; only the agent surface had filed the record
+  // under Deep Lattice, and that was drift inherited from the campaign FILE
+  // routes it arrived beside in P6.
+  //
+  // They stay in THIS router because their tools ship in the deep-lattice-tools
+  // plugin, which keeps one loopback base URL — the same reason /signup-preview
+  // lives here. The cross-service hop is explicit: each passes its own basePath.
+  //
+  // The agent-facing paths are deliberately UNCHANGED (/api/deep-lattice/
+  // campaigns…), so the plugin's tools need no edit — only the base path they
+  // resolve to moved. The campaign FILE routes below stay on Deep Lattice: a
+  // campaign file IS a Deep Lattice document, a campaign is not.
+  //
+  // ROLLOUT: these must ship together with the orchestrator's new mount.
+  // read_campaign and list_active_campaigns are already live in production, so
+  // either side deploying alone leaves them 404ing on the other's old path.
 
   // GET /api/deep-lattice/campaigns?agentId=
-  // → GET /internal/deep-lattice/campaigns?tenantId=&agent_id=
+  // → GET $ORCH/internal/campaigns?tenantId=&agent_id=
   // Every ACTIVE campaign with its channel claims — what the cross-campaign
   // planner runs on. Active is the whole filter: no other status takes new
   // work, so returning one would invite volume that task creation refuses.
   // Registered before /campaigns/:campaignId to mirror the orchestrator's
   // ordering; the two do not actually collide (different segment counts).
   router.get("/campaigns", (req, res) => {
-    return forward(req, res, "/campaigns");
+    return forward(req, res, "", undefined, { basePath: CAMPAIGNS_BASE_PATH });
+  });
+
+  // POST /api/deep-lattice/campaigns
+  // → POST $ORCH/internal/campaigns
+  // Body: { agent_id, tenantId, name, start_date, end_date, segment,
+  //         core_pitch, offer, channels: [<type>, …] }
+  // create_campaign — an agent brings a campaign RECORD into existence, which
+  // nothing but the orchestrator's own generation paths and the founder's form
+  // could do before. Volumes are NOT in the body: the agent names channel types
+  // and the per-channel daily maximum is computed from the channel default and
+  // current headroom (D23).
+  //
+  // Answers 201 even when ACTIVATION was refused — the campaign was written and
+  // only its start was declined, so the refusal rides back in an `activation`
+  // block and the row is left Draft. A 422 is the other case entirely: the
+  // WRITER refused, so nothing exists. Both statuses pass through untouched;
+  // the tool is what has to tell them apart.
+  router.post("/campaigns", (req, res) => {
+    return forward(req, res, "", undefined, { basePath: CAMPAIGNS_BASE_PATH });
   });
 
   // GET /api/deep-lattice/campaigns/:campaignId?agentId=
-  // → GET /internal/deep-lattice/campaigns/:campaignId?tenantId=&agent_id=
+  // → GET $ORCH/internal/campaigns/:campaignId?tenantId=&agent_id=
   // The campaign's DEFINITION — what it is aimed at and what it says. Read
   // before proposing a campaign's angles and topics: a newly created campaign
   // has no file yet, so the definition is the only input that exists. Carries
   // no ceiling or headroom figures — volumes are computed, not proposed (D23).
   router.get("/campaigns/:campaignId", (req, res) => {
-    return forward(req, res, `/campaigns/${encodeURIComponent(req.params.campaignId)}`);
+    return forward(req, res, `/${encodeURIComponent(req.params.campaignId)}`, undefined, {
+      basePath: CAMPAIGNS_BASE_PATH,
+    });
   });
+
+  // PATCH /api/deep-lattice/campaigns/:campaignId
+  // → PATCH $ORCH/internal/campaigns/:campaignId
+  // Body: { agent_id, tenantId, name?, start_date?, end_date?, segment?,
+  //         core_pitch?, offer?, channels?, status? }
+  // update_campaign — the definition, the channel set and the status in ONE
+  // call, where the founder's own surface splits the same ground across a
+  // PATCH, a channels PUT and three status POSTs. The status field is what
+  // gives an agent the ability to PAUSE a campaign; nothing agent-facing could
+  // move a status before.
+  //
+  // `segment` and `channels` are REPLACED wholesale orchestrator-side, not
+  // merged — `segment` overwrites the jsonb column and `channels` soft-deletes
+  // every existing claim before writing the new set. The tool's schema is what
+  // makes that safe: it requires the complete structure for both, so a partial
+  // one cannot be sent in the first place. Do not relax that here.
+  //
+  // Volumes stay computed, exactly as at create (D23).
+  //
+  // Answers 200 even when the TRANSITION was refused — the definition and
+  // channel edits before it are already committed, so calling the whole request
+  // a failure would misdescribe it. The refusal rides back in `transition`,
+  // present only when the body asked for a status.
+  router.patch("/campaigns/:campaignId", (req, res) => {
+    return forward(req, res, `/${encodeURIComponent(req.params.campaignId)}`, undefined, {
+      basePath: CAMPAIGNS_BASE_PATH,
+    });
+  });
+
+  // ── Campaign FILES — Deep Lattice, default basePath ────────
 
   // GET /api/deep-lattice/campaigns/:campaignId/files/:fn?agentId=
   // → GET /internal/deep-lattice/campaigns/:campaignId/files/:fn?tenantId=&agent_id=

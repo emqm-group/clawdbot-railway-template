@@ -16,10 +16,16 @@
 //     read_publishing_schedule (also founder-editable).
 //   Campaigns (migration 019): list_active_campaigns (every running campaign
 //     — the planner's entry point, and the only campaign discovery here),
-//     read_campaign (one campaign record), read_campaign_file,
-//     create_campaign_file (its per-function strategy file). The only
-//     campaign-scoped documents here; the latter three take a campaign_id
-//     supplied by the calling agent's task.
+//     create_campaign (a new campaign RECORD — the only tool here that brings
+//     one into existence), update_campaign (its definition, channels and/or
+//     status — the only agent-facing way to pause one), read_campaign (one
+//     campaign record),
+//     read_campaign_file, create_campaign_file (its per-function strategy
+//     file). The only campaign-scoped documents here; the three that read or
+//     write an existing campaign take a campaign_id supplied by the calling
+//     agent's task. The record routes are NOT Deep Lattice orchestrator-side
+//     (/internal/campaigns); the wrapper overrides the base path per route, so
+//     these tools' own paths are unchanged — see src/api/deepLattice.js.
 //   Pre-signup briefs (migration 011): read_signup_preview (read-only). The one
 //     tool here that is NOT a Deep Lattice layer — see its registration below.
 //
@@ -107,11 +113,58 @@ async function callWrapper(method, path, body, { notFoundOk = false, notFoundCod
     return null;
   }
   if (!res.ok) {
+    // `detail` carries the part of a refusal an agent can act on — which channel
+    // types are not connected, which ceilings a claim breaches. Only the campaign
+    // record routes send it today, and dropping it there would leave a retryable
+    // refusal ("unknown_channels") indistinguishable from an unretryable one.
+    // Appended only alongside a message we picked out of the body: the last-resort
+    // branch stringifies the WHOLE body, which already carries detail, and adding
+    // it again would print it twice.
+    const message = data.error ?? data.message;
+    const suffix =
+      message != null && data.detail != null ? ` (${JSON.stringify(data.detail)})` : "";
     throw new Error(
-      `Deep Lattice tool error [${res.status}]: ${data.error ?? data.message ?? JSON.stringify(data)}`
+      `Deep Lattice tool error [${res.status}]: ${message ?? JSON.stringify(data)}${suffix}`
     );
   }
   return data;
+}
+
+// The four fields a campaign's target segment is made of. Every path that writes
+// a campaign — the pre-signup generation, the prospect chain, the migration and
+// the founder's form — produces exactly these, so a campaign whose segment is
+// shaped differently reads as a different kind of object downstream.
+const SEGMENT_FIELDS = ["role", "company_type", "company_size", "geography"];
+
+// A segment REPLACES the stored jsonb column outright rather than merging into
+// it, so a key that is present but blank is not a no-op — it overwrites a real
+// value with nothing. The orchestrator will not catch that: its validator asks
+// only that ONE field be populated, which a three-blanks body satisfies. The
+// schema asks for four non-empty strings; this is the check a model that ignored
+// the schema still meets, and it is worth having twice because the failure is
+// silent and the lost fields are not recoverable from our side.
+//
+// Returns the offending field names, so the agent is told which ones to fill.
+function blankSegmentFields(segment) {
+  if (segment == null || typeof segment !== "object" || Array.isArray(segment)) {
+    return SEGMENT_FIELDS;
+  }
+  return SEGMENT_FIELDS.filter(
+    (k) => typeof segment[k] !== "string" || segment[k].trim() === ""
+  );
+}
+
+// Normalise an optional free-text/date field a model may have filled in loosely.
+// A blank string means the same as omitting it, and is reported as `absent`.
+// A NON-STRING is deliberately passed through untouched rather than dropped or
+// nulled: the wrong type has to reach the orchestrator and be REFUSED, because
+// quietly discarding it turns a malformed end_date into an open-ended campaign
+// and reports success.
+function optionalText(value) {
+  if (value == null) return { absent: true };
+  if (typeof value !== "string") return { absent: false, value };
+  const trimmed = value.trim();
+  return trimmed === "" ? { absent: true } : { absent: false, value: trimmed };
 }
 
 function okResult(payload) {
@@ -914,6 +967,392 @@ export default function register(api) {
         return okResult({ campaign });
       } catch (err) {
         logError("read_campaign", err.message, { agentId, campaignId });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // create_campaign — the campaign RECORD, not its file, and the only tool here
+  // that brings a campaign into existence rather than being handed one. Every
+  // campaign row before this came from the orchestrator itself or the founder's
+  // form; an agent could read a campaign and write its strategy but had no way
+  // to propose one (campaigns-design.md P9).
+  //
+  // VOLUMES ARE NOT A PARAMETER (D23). The agent names channel TYPES; each
+  // per-channel daily maximum is computed orchestrator-side as the lesser of the
+  // channel default and current headroom, by the same arithmetic the founder's
+  // form runs. Handing the model that number to pick would have it reason about
+  // an account ceiling it has no say over, and its figure would be refused one
+  // call later — the same reason read_campaign carries no headroom figures.
+  //
+  // Creation and activation are ONE call, which is what makes the start date
+  // decide the outcome: today or earlier lands Active, later lands Scheduled.
+  //
+  // A REFUSED ACTIVATION IS STILL A SUCCESS RESPONSE — the campaign was written
+  // and only its start was declined (no connected channel, no headroom, no
+  // credits, the active limit), so it sits Draft and takes no work. That is the
+  // one outcome an agent will misread as "running", so the tool returns
+  // `activation` alongside the campaign and the description names it. A WRITER
+  // refusal is the opposite case and 422s — nothing was created, and callWrapper
+  // surfaces it as an error.
+  //
+  // The segment keys mirror what every other creation path produces (the
+  // pre-signup generation, the prospect chain, the migration): role,
+  // company_type, company_size, geography. The column is a free JSONB map, but
+  // the readers downstream expect those four, and a campaign whose segment is
+  // shaped differently reads as a different kind of object.
+  //
+  // No proposal task fires and no Memory Manager resync is queued: the agent
+  // calling this is the one that writes the strategy file next, so a proposal
+  // task would aim at its own author and a resync would find no file.
+  api.registerTool((ctx) => ({
+    name: "create_campaign",
+    description:
+      "Create a new campaign. Use it only when your task tells you to propose or set up a campaign — never to 'organise' work that an existing campaign already covers; call list_active_campaigns first and reuse a campaign that fits. You supply the definition only: name, start and end dates, who it targets, the core pitch, the offer, and which channels it runs on. You do NOT set post volumes — the per-channel daily maximum is computed from the account's ceiling and what other campaigns already claim, and is returned to you. The campaign is created and started in the same call, so start_date decides what happens: today or earlier makes it Active and it starts taking work immediately, a later date makes it Scheduled. Returns { campaign, activation }. CHECK activation.ok — when it is false the campaign was still created but is sitting in Draft and takes NO work; activation.code says why (no connected channel, no headroom left, no credits, or the active-campaign limit), and that is something to report back, not to retry. Never call this twice for the same campaign: a failed activation does not mean it was not created. After a successful create, write its strategy with create_campaign_file, using the id from the returned campaign.",
+    parameters: {
+      type: "object",
+      required: ["name", "start_date", "segment", "core_pitch", "channels"],
+      additionalProperties: false,
+      properties: {
+        name: {
+          type: "string",
+          minLength: 1,
+          maxLength: 120,
+          description:
+            "A short name identifying the campaign, e.g. 'Q4 enterprise push'. Shown to the founder.",
+        },
+        start_date: {
+          type: "string",
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+          description:
+            "The day the campaign starts, YYYY-MM-DD. Today or earlier starts it immediately; a later date schedules it. Do not backdate to force an early start.",
+        },
+        end_date: {
+          type: "string",
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+          description:
+            "The day the campaign ends, YYYY-MM-DD, for a time-limited campaign. Must not be before start_date. Omit it entirely for an open-ended campaign — there is no separate flag for that.",
+        },
+        segment: {
+          type: "object",
+          required: ["role", "company_type", "company_size", "geography"],
+          additionalProperties: false,
+          description:
+            "Who the campaign targets. Fill every field; where you are not certain, write the best answer the tenant's profile supports rather than leaving it vague.",
+          properties: {
+            role: {
+              type: "string",
+              minLength: 1,
+              description: "The job title or function being targeted, e.g. 'Head of Engineering'.",
+            },
+            company_type: {
+              type: "string",
+              minLength: 1,
+              description: "The kind of company, e.g. 'B2B SaaS, Series A-C'.",
+            },
+            company_size: {
+              type: "string",
+              minLength: 1,
+              description: "Headcount or revenue band, e.g. '50-200 employees'.",
+            },
+            geography: {
+              type: "string",
+              minLength: 1,
+              description: "Where they are, e.g. 'UK and Ireland'.",
+            },
+          },
+        },
+        core_pitch: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4000,
+          description:
+            "What this campaign argues to that segment — the single claim every piece of work for it must support. This becomes a HARD CONSTRAINT on everything written for the campaign, so state it precisely.",
+        },
+        offer: {
+          type: "string",
+          maxLength: 4000,
+          description:
+            "The concrete thing being offered, if there is one — a trial, a demo, a discount. Omit it when the campaign has no offer; do not invent one.",
+        },
+        channels: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          description:
+            "Which channels the campaign runs on, by type. Only channels the tenant has actually connected can be claimed — naming one that is not connected refuses the whole creation and nothing is written.",
+          items: {
+            type: "string",
+            enum: ["linkedin-personal", "linkedin-company", "x", "blog"],
+          },
+        },
+      },
+    },
+    async execute(_toolCallId, args = {}) {
+      const {
+        name,
+        start_date: startDate,
+        end_date: endDate,
+        segment,
+        core_pitch: corePitch,
+        offer,
+        channels,
+      } = args;
+      const agentId = ctx.agentId;
+      const blank = blankSegmentFields(segment);
+      if (blank.length) {
+        const message = `create_campaign needs every segment field filled in — missing or blank: ${blank.join(", ")}.`;
+        logError("create_campaign", message, { agentId, name });
+        return errorResult(message);
+      }
+
+      log("create_campaign", "called", {
+        agentId,
+        name,
+        startDate,
+        endDate,
+        channels,
+      });
+      try {
+        // Blank and absent are collapsed for the two optional fields. A model with
+        // nothing to say for them often sends "" rather than omitting the key, and
+        // the orchestrator treats the two differently: a MISSING end_date means
+        // open-ended while "" is a malformed date and 400s, and a blank offer would
+        // be stored as though the campaign had one. A wrong TYPE is forwarded, not
+        // dropped, so it is refused rather than quietly making the campaign
+        // open-ended — see optionalText.
+        const end = optionalText(endDate);
+        const off = optionalText(offer);
+        const data = await callWrapper("POST", "/campaigns", {
+          agentId,
+          name,
+          start_date: startDate,
+          ...(end.absent ? {} : { end_date: end.value }),
+          segment,
+          core_pitch: corePitch,
+          ...(off.absent ? {} : { offer: off.value }),
+          channels,
+        });
+        const campaign = data?.campaign ?? null;
+        const activation = data?.activation ?? null;
+        log("create_campaign", "success", {
+          agentId,
+          campaignId: campaign?.id,
+          status: campaign?.status,
+          activated: activation?.ok ?? null,
+          refusal: activation?.ok === false ? activation.code : null,
+        });
+        return okResult({ campaign, activation });
+      } catch (err) {
+        logError("create_campaign", err.message, { agentId, name });
+        return errorResult(err.message);
+      }
+    },
+  }));
+
+  // update_campaign — the definition, the channel set and the STATUS in one
+  // call, where the founder's own surface splits the same ground across a PATCH,
+  // a channels PUT and three status POSTs. One tool rather than five, and the
+  // three parts of a change arrive together, so the Memory Manager is asked to
+  // resync once naming everything that moved.
+  //
+  // THE STATUS FIELD IS WHAT LETS AN AGENT PAUSE A CAMPAIGN. Nothing agent-facing
+  // could move a status before: an agent could create a campaign and write its
+  // file, but one that should stop waited for the founder or for the system's own
+  // funding and date hooks.
+  //
+  // SEGMENT AND CHANNELS ARE REPLACED, NOT MERGED. `segment` overwrites the jsonb
+  // column outright and `channels` soft-deletes every existing claim before
+  // writing the new set, so a partial value silently destroys the rest. The
+  // schema below asks for all four segment keys non-empty and a non-empty channel
+  // list, and `execute` re-checks the segment before sending, because `required`
+  // only proves a key is PRESENT — a body with three blank strings satisfies both
+  // the schema's required list and the orchestrator's validator, and overwrites
+  // three real values with nothing. Keep both halves: relaxing either turns a
+  // one-field edit into a wipe.
+  //
+  // NULL CLEARS, ABSENT LEAVES ALONE, for the two nullable columns. `end_date`
+  // null makes a time-limited campaign open-ended and `offer` null removes it;
+  // omitting either key changes nothing. `start_date` has no such case — the
+  // column is NOT NULL and a campaign always has one — so it is a plain string.
+  //
+  // VOLUMES ARE STILL NOT AN INPUT (D23), as at create: the agent names channel
+  // TYPES and each daily maximum is recomputed from the channel default and the
+  // headroom left once this campaign's own existing claims are set aside.
+  //
+  // `status` names a DESTINATION, not an action, because that is what an agent
+  // knows about a campaign it is reasoning over. Only three are reachable —
+  // Unfunded and Expired are system-driven. Asking for `active` on a campaign
+  // whose start date is in the future lands it SCHEDULED, not Active, which is
+  // why the tool tells the agent to read the returned status rather than assume.
+  //
+  // A REFUSED TRANSITION IS STILL A SUCCESS RESPONSE, exactly as a refused
+  // activation is at create: the definition and channel edits before it are
+  // already committed. The outcome rides back in `transition`.
+  api.registerTool((ctx) => ({
+    name: "update_campaign",
+    description:
+      "Change an existing campaign — any part of its definition, the channels it runs on, its status, or several at once. Use it when something the campaign says or targets has actually changed, and to STOP a campaign by setting status to paused. Send only the parts you are changing; anything you leave out is untouched. TWO EXCEPTIONS, and getting them wrong destroys data: `segment` and `channels` REPLACE what is stored rather than merging into it. To change one segment field, send all four with the others copied unchanged from read_campaign; to add or drop a channel, send the complete list the campaign should end up with. Read the campaign first with read_campaign so you are copying its real current values, not what you remember. To clear a field, send it as null: end_date null makes a campaign open-ended, offer null removes the offer. You do NOT set post volumes — each channel's daily maximum is recomputed from the account's ceiling and returned to you. Returns { campaign, transition }. Trust campaign.status over what you asked for: requesting active on a campaign that starts in the future makes it SCHEDULED, not active. When you asked for a status, CHECK transition.ok — false means every other edit was still saved but the status did not move, and transition.code says why; that is something to report back, not to retry. transition is null when you did not ask for a status change.",
+    parameters: {
+      type: "object",
+      required: ["campaign_id"],
+      additionalProperties: false,
+      properties: {
+        campaign_id: {
+          type: "string",
+          description: "The campaign's id, exactly as supplied by your task.",
+        },
+        name: {
+          type: "string",
+          minLength: 1,
+          maxLength: 120,
+          description: "A new name for the campaign. Omit to leave it unchanged.",
+        },
+        start_date: {
+          type: "string",
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+          description:
+            "A new start date, YYYY-MM-DD. Cannot be cleared — a campaign always has one. Moving it does not by itself start or stop the campaign; use status for that.",
+        },
+        end_date: {
+          type: ["string", "null"],
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+          description:
+            "A new end date, YYYY-MM-DD, or null to make the campaign open-ended. Must not be before the start date — the stored one if you are not changing it in the same call.",
+        },
+        segment: {
+          type: "object",
+          required: ["role", "company_type", "company_size", "geography"],
+          additionalProperties: false,
+          description:
+            "REPLACES the whole target segment. Send all four fields, copying the ones you are not changing from read_campaign — anything you leave out is lost, not kept.",
+          properties: {
+            role: {
+              type: "string",
+              minLength: 1,
+              description: "The job title or function being targeted, e.g. 'Head of Engineering'.",
+            },
+            company_type: {
+              type: "string",
+              minLength: 1,
+              description: "The kind of company, e.g. 'B2B SaaS, Series A-C'.",
+            },
+            company_size: {
+              type: "string",
+              minLength: 1,
+              description: "Headcount or revenue band, e.g. '50-200 employees'.",
+            },
+            geography: {
+              type: "string",
+              minLength: 1,
+              description: "Where they are, e.g. 'UK and Ireland'.",
+            },
+          },
+        },
+        core_pitch: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4000,
+          description:
+            "A new core pitch — the single claim every piece of work for this campaign must support. Changing it changes what is already-approved work was written against, so change it only when the campaign's argument has genuinely moved.",
+        },
+        offer: {
+          type: ["string", "null"],
+          maxLength: 4000,
+          description:
+            "A new offer, or null to remove the campaign's offer entirely. Omit to leave it as it is.",
+        },
+        channels: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          description:
+            "REPLACES the campaign's whole channel set with this list. Include every channel it should keep, not just the one you are adding — anything missing is removed and its daily volume released. Only channels the tenant has actually connected can be claimed.",
+          items: {
+            type: "string",
+            enum: ["linkedin-personal", "linkedin-company", "x", "blog"],
+          },
+        },
+        status: {
+          type: "string",
+          enum: ["active", "paused", "draft"],
+          description:
+            "Where the campaign should end up. 'paused' stops a running campaign taking new work. 'active' starts or resumes one — but a campaign whose start date is in the future becomes SCHEDULED instead. 'draft' unschedules a Scheduled campaign. Unfunded and Expired cannot be set: the system owns those.",
+        },
+      },
+    },
+    async execute(_toolCallId, args = {}) {
+      const { campaign_id: campaignId, ...rest } = args;
+      const agentId = ctx.agentId;
+
+      // Present-vs-absent is the whole contract here, so the body is built by
+      // testing for the KEY rather than for a truthy value: `end_date: null` and
+      // no end_date at all mean opposite things (clear it / leave it), and a
+      // falsy-value test would collapse them into one.
+      const body = { agentId };
+      const copy = (from, to = from) => {
+        if (from in rest) body[to] = rest[from];
+      };
+      copy("name");
+      copy("start_date");
+      copy("segment");
+      copy("core_pitch");
+      copy("channels");
+      copy("status");
+      // A model with nothing to put here sometimes sends "" rather than null.
+      // Both mean "remove it", and "" would 400 as a malformed date and store a
+      // blank offer as though the campaign had one. A wrong TYPE is forwarded
+      // untouched so the orchestrator refuses it — coercing it to null here would
+      // CLEAR the field and report success, when nothing of the sort was asked
+      // for. See optionalText.
+      for (const key of ["end_date", "offer"]) {
+        if (!(key in rest)) continue;
+        const norm = optionalText(rest[key]);
+        body[key] = norm.absent ? null : norm.value;
+      }
+
+      // Checked only when the body carries a segment: absent means "leave it", and
+      // the stored one is not this tool's to police.
+      if ("segment" in rest) {
+        const blank = blankSegmentFields(rest.segment);
+        if (blank.length) {
+          const message = `update_campaign replaces the whole segment, so every field must be filled in — missing or blank: ${blank.join(", ")}. Copy the ones you are not changing from read_campaign.`;
+          logError("update_campaign", message, { agentId, campaignId });
+          return errorResult(message);
+        }
+      }
+
+      const changed = Object.keys(body).filter((k) => k !== "agentId");
+      // Caught here rather than at the orchestrator so the agent is told what it
+      // actually did — sent an id and nothing else — instead of "nothing to
+      // update", which reads as though the edit was rejected.
+      if (changed.length === 0) {
+        const message =
+          "update_campaign needs at least one field to change besides campaign_id.";
+        logError("update_campaign", message, { agentId, campaignId });
+        return errorResult(message);
+      }
+
+      log("update_campaign", "called", { agentId, campaignId, changed });
+      try {
+        const data = await callWrapper(
+          "PATCH",
+          `/campaigns/${encodeURIComponent(campaignId)}`,
+          body
+        );
+        const campaign = data?.campaign ?? null;
+        const transition = data?.transition ?? null;
+        log("update_campaign", "success", {
+          agentId,
+          campaignId,
+          changed,
+          status: campaign?.status,
+          transitioned: transition?.ok ?? null,
+          refusal: transition?.ok === false ? transition.code : null,
+        });
+        return okResult({ campaign, transition });
+      } catch (err) {
+        logError("update_campaign", err.message, { agentId, campaignId, changed });
         return errorResult(err.message);
       }
     },
