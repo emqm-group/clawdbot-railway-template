@@ -865,24 +865,33 @@ export default function register(api) {
   // it: with two campaigns open, guessing attaches work to the wrong one, and
   // with one open today it would silently become wrong tomorrow.
   //
-  // The write takes the WHOLE FILE — header block and body. The orchestrator
-  // stores exactly what it is handed and composes no part of it, so the agent
-  // writes the campaign's definition into the header itself, reading it back
-  // from read_campaign rather than from memory.
+  // A CAMPAIGN FILE IS BODY ONLY — there is no header block, and the model must
+  // not be told to write one. These files used to open with a header mirroring
+  // the record (name, id, dates, segment, pitch, offer, channels and their daily
+  // maximums); that block is gone everywhere. It was a second copy of facts the
+  // database already owns, stale the moment any of them moved, and it cost a
+  // Memory Manager task per change to keep aligned.
   //
-  // The database is still the source of truth; keeping the file's mirror of it
-  // aligned is the Memory Manager's job, and the orchestrator fires it a
-  // resync task whenever a mirrored field moves. That directive is only
-  // followable because the header is agent-written — do not tell the model to
-  // omit it.
+  // The definition now rides along with the READ instead: the orchestrator
+  // returns the campaign record beside the content, so a writer gets the
+  // strategy and the constraints it was written under from one call.
   //
-  // One live file per (campaign, function), rewritten in place, so a write
+  // Every write runs `stripHeaderBlock` orchestrator-side, but it is NARROW ON
+  // PURPOSE: it fires only on the old header's own marker near the top
+  // (`**Campaign ID:**`, or a `# Campaign:` heading) and cuts only as far as the
+  // `---` that closed it, so a body whose first line merely happens to be a
+  // heading survives untouched. A header a model invents in any other shape is
+  // therefore stored and permanent — which is why these tools tell the model not
+  // to write one rather than relying on the strip to undo it.
+  //
+  // Files written BEFORE the header was dropped keep theirs until something
+  // rewrites them; there is no backfill. So a reader can still meet a header in
+  // stored content, and read_campaign_file says plainly that the returned record
+  // outranks anything in the body that looks like a definition.
+  //
+  // The orchestrator stores exactly what it is handed and composes no part of
+  // it. One live file per (campaign, function), rewritten in place, so a write
   // replaces the whole previous file rather than versioning it.
-  //
-  // A file generated BEFORE signup has no header — the campaign id and the
-  // per-channel maximums do not exist yet, and those paths are bare model
-  // calls with no agent to write one. MM adds it on the first campaign change
-  // after signup, so the read tool has to treat a headerless file as normal.
   //
   // No tool for listing a campaign's FILES: with `content` the only function,
   // read_campaign_file returning null already answers which files exist. Add
@@ -936,7 +945,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_campaign",
     description:
-      "Read a campaign's definition — its id, name, status, start and end dates, target segment, core pitch, offer, and its channels. Read it before proposing or writing anything for a campaign: the segment, pitch and offer are HARD CONSTRAINTS on what you may produce, not suggestions. A channel entry has enabled true or false, and only the enabled ones take work. A campaign that has just been created has no strategy file yet, so this is the only input that exists — use read_campaign_file for the angles and topics once one has been written. This is also the source to copy the campaign header from when writing that file with create_campaign_file. campaign_id must be the one your task gave you — never guess it. Returns { campaign }.",
+      "Read a campaign's definition — its id, name, status, start and end dates, target segment, core pitch, offer, and its channels. Read it before proposing or writing anything for a campaign: the segment, pitch and offer are HARD CONSTRAINTS on what you may produce, not suggestions. A channel entry has enabled true or false, and only the enabled ones take work. A campaign that has just been created has no strategy file yet, so this is the only input that exists — use read_campaign_file for the angles and topics once one has been written. campaign_id must be the one your task gave you — never guess it. Returns { campaign }.",
     parameters: {
       type: "object",
       required: ["campaign_id"],
@@ -1361,7 +1370,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "read_campaign_file",
     description:
-      "Read a campaign's working strategy file — the angles, topics and guidance for producing work for THAT campaign. It usually opens with a header block mirroring the campaign's definition, but a file generated before the founder signed up has no header at all; that is normal, not a damaged file. Read it before writing anything for a campaign, and take the definition from read_campaign whenever the header is missing or disagrees with it — the header is agent-written and the database is the source of truth. campaign_id must be the one your task gave you — never guess it, and never reuse one from another task. Returns { content }, where content is null if this campaign has no file for that function yet.",
+      "Read a campaign's working strategy file — the angles, topics and guidance for producing work for THAT campaign — together with the campaign's definition. Read it before writing anything for a campaign; it is the one call that gives you both what to write and the constraints to write it under, so you do not need read_campaign as well. Take the segment, core pitch, offer and channels from the returned campaign — that is the database's own copy and is always current. Campaign files are the strategy only and carry no header block, but one written before that rule may still sit at the top of an older file: treat anything in the content that restates the campaign's definition as out of date and use the returned campaign instead, whatever the body says. Returns { content, campaign }. Both are null when this campaign has no file for that function yet — that is a normal state meaning nothing has been written, not an error and not a bad id; call read_campaign for the definition in that case. campaign_id must be the one your task gave you — never guess it, and never reuse one from another task.",
     parameters: {
       type: "object",
       required: ["campaign_id"],
@@ -1391,13 +1400,33 @@ export default function register(api) {
           { notFoundOk: true, notFoundCode: "document_not_found" }
         );
         const content = data?.content ?? null;
+        // The record rides along with the read now that the file carries no
+        // header — the strategy and the constraints it was written under in one
+        // call. Null on the not-found path: that 404 answers "no file", so there
+        // is no envelope to take a campaign off, and the description sends the
+        // agent to read_campaign for the definition in that case.
+        const campaign = data?.campaign ?? null;
+        // Content WITHOUT a record is neither of those cases — it is an
+        // orchestrator too old to send one, which happens while this change and
+        // its backend half are on different environments. Worth a line in the log
+        // because the agent's own symptom is silent: it gets a strategy with no
+        // definition to check it against, exactly what dropping the header was
+        // supposed to make impossible.
+        if (content != null && campaign == null) {
+          logError(
+            "read_campaign_file",
+            "file returned without a campaign record — orchestrator predates the campaign-file header removal",
+            { agentId, campaignId, fn }
+          );
+        }
         log("read_campaign_file", "success", {
           agentId,
           campaignId,
           fn,
           contentLength: content?.length ?? 0,
+          status: campaign?.status ?? null,
         });
-        return okResult({ content });
+        return okResult({ content, campaign });
       } catch (err) {
         logError("read_campaign_file", err.message, { agentId, campaignId, fn });
         return errorResult(err.message);
@@ -1408,7 +1437,7 @@ export default function register(api) {
   api.registerTool((ctx) => ({
     name: "create_campaign_file",
     description:
-      "Write a campaign's working strategy file — the angles, topics and guidance the writers for THAT campaign work from. Pass the COMPLETE file: it is stored exactly as given and replaces everything that was there, so read the current one first rather than assuming your last version is still present. Open it with a header block stating the campaign's definition — id, name, status, start and end dates, target segment, core pitch, offer, and each channel with its daily maximum AND whether it is enabled — then the strategy below it. Take those values from read_campaign, never from memory: the database is the source of truth and the header only mirrors it. Mark disabled channels as disabled rather than dropping them, and do not write strategy aimed at one: work for a disabled channel is refused when the task is created. Content must not be empty; there is no way to clear a campaign file from here. campaign_id must be the one your task gave you — never guess it.",
+      "Write a campaign's working strategy file — the angles, topics and guidance the writers for THAT campaign work from. Write the STRATEGY ONLY. Do NOT open the file with a header, summary or restatement of the campaign's definition: its name, id, status, dates, segment, core pitch, offer and channels are held on the campaign record and handed to every reader automatically, so copying them into the file adds nothing and goes stale the moment one of them changes. Pass the complete strategy: it is stored exactly as given and replaces everything that was there, so read the current one first with read_campaign_file rather than assuming your last version is still present. Write only for channels that are enabled — work aimed at a disabled one is refused when the task is created. Content must not be empty; there is no way to clear a campaign file from here. campaign_id must be the one your task gave you — never guess it.",
     parameters: {
       type: "object",
       required: ["campaign_id", "content"],
@@ -1422,7 +1451,7 @@ export default function register(api) {
           type: "string",
           minLength: 1,
           description:
-            "The complete markdown file: the campaign header block, then the strategy.",
+            "The complete strategy as markdown — angles, topics and guidance, with no header block or restatement of the campaign's definition.",
         },
         function: campaignFunctionParam,
       },

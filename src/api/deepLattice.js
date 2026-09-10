@@ -192,12 +192,16 @@ export function createDeepLatticeRouter() {
   // the campaign within the tenant and 404s `campaign_not_found` when it does
   // not belong to it.
   //
-  // The write takes the WHOLE FILE — header block and body. The orchestrator
-  // stores it verbatim and composes no part of it, so the campaign's
-  // definition in the header is agent-written, read back from
-  // GET /campaigns/:campaignId. The database remains the source of truth; the
-  // Memory Manager is fired a resync task to realign the file when a mirrored
-  // field moves, which only works because the header is the agent's to write.
+  // The write takes the STRATEGY BODY. Campaign files no longer open with a
+  // header mirroring the record — that block was a second copy of facts the
+  // database owns, stale the moment one of them moved, and it cost a Memory
+  // Manager task per change to keep aligned. The orchestrator strips one a
+  // writer produces anyway, though only in the old header's own shape.
+  //
+  // The definition rides along with the READ instead: the GET returns the
+  // campaign record beside the content, so a writer gets the strategy and the
+  // constraints it was written under without a second call. The database is the
+  // source of truth and now the only copy of it.
   //
   // Rewritten in place at a key stable per (campaign, function) — one live
   // document per pair, like the daily-target composite.
